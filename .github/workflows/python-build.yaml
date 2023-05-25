@@ -60,4 +60,4 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: build_XLSX-split_${{ matrix.os }}_v${{ env.COMMIT_MESSAGE }}
-          path: dist/windows-2019/AXLSX-split.exe
+          path: dist/windows-2019/XLSX-split.exe
