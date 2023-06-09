@@ -28,7 +28,7 @@ for tag, departments in config.items('TagDepartments'):
     tag_departments[tag] = [dep.strip() for dep in departments.split(',')]
 
 # 读取DELLIST的内容
-name_list = config.get('DELLIST', 'names', fallback="").split(",")
+name_list = config.get('DELLIST', del_key, fallback="").split(", ")
 
 # 读取XLSX文件
 workbook = load_workbook(xlsx_file)
