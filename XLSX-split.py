@@ -21,10 +21,14 @@ output_directory = config.get('General', 'output_directory')
 raw_sheet_name = config.get('General', 'raw_sheet_name')
 csv_encoding = config.get('General', 'csv_encoding', fallback='utf-8')
 department_column_name = config.get('General', 'KEY', fallback='二级部门名称')
+del_key = config.get('General', 'DELKEY', fallback='姓名')  # 读取DELKEY
 
 tag_departments = {}
 for tag, departments in config.items('TagDepartments'):
     tag_departments[tag] = [dep.strip() for dep in departments.split(',')]
+
+# 读取DELLIST的内容
+name_list = config.get('DELLIST', 'names', fallback="").split(",")
 
 # 读取XLSX文件
 workbook = load_workbook(xlsx_file)
@@ -43,6 +47,10 @@ if raw_sheet_name in workbook.sheetnames:
         for index, column in enumerate(columns_to_process):
             row_data[column] = row[index]
 
+        # 如果姓名在DELLIST里面，则跳过这一行
+        if row_data.get(del_key) in name_list:
+            continue
+
         data.append(row_data)
 
     # 添加标签字段
@@ -53,7 +61,6 @@ if raw_sheet_name in workbook.sheetnames:
                 break
         else:
             row['标签'] = '其他'
-
 
     # 根据标签生成多个CSV表
     tags = set(row['标签'] for row in data)
@@ -66,7 +73,6 @@ if raw_sheet_name in workbook.sheetnames:
             writer = csv.DictWriter(file, fieldnames=tag_data[0].keys())
             writer.writeheader()
             writer.writerows(tag_data)
-
 
         print(f"已生成CSV文件: {filepath}")
 else:
