@@ -1,9 +1,33 @@
 import pandas as pd
 import re
+import sys
+import os
 
 # 读取Excel文件
-file_path = r'H:\Cache\客户对象导出结果.xlsx'
-df = pd.read_excel(file_path)
+if len(sys.argv) < 2:
+    print("用法: python 客户分类切割.py <输入文件路径.xlsx> [输出目录]")
+    print("示例: python 客户分类切割.py 客户对象导出结果.xlsx")
+    sys.exit(1)
+
+input_file = sys.argv[1]
+if not os.path.exists(input_file):
+    print(f"错误: 文件不存在 - {input_file}")
+    sys.exit(1)
+
+# 获取输出目录（如果提供了第二个参数）
+if len(sys.argv) >= 3:
+    output_dir = sys.argv[2]
+else:
+    output_dir = os.path.dirname(input_file) if os.path.dirname(input_file) else '.'
+
+# 确保输出目录存在
+os.makedirs(output_dir, exist_ok=True)
+
+print(f"读取文件: {input_file}")
+print(f"输出目录: {output_dir}")
+
+df = pd.read_excel(input_file)
+print(f"总共读取到 {len(df)} 行数据")
 
 # 定义规则
 rules = {
@@ -69,7 +93,8 @@ save_in_one_file = True
 unmatched = df.copy()
 
 if save_in_one_file:
-    writer = pd.ExcelWriter(r'H:\Cache\客户名称分类结果.xlsx', engine='xlsxwriter')
+    output_file = os.path.join(output_dir, '客户名称分类结果.xlsx')
+    writer = pd.ExcelWriter(output_file, engine='xlsxwriter')
 
 # 创建子表
 for category, rule in rules.items():
@@ -93,14 +118,22 @@ for category, rule in rules.items():
     if save_in_one_file:
         # 将匹配到的数据写入同一个Excel文件的不同标签页
         matched.to_excel(writer, sheet_name=category, index=False)
+        print(f"分类 '{category}': {len(matched)} 个客户")
     else:
         # 将子表保存为单独的Excel文件
-        matched.to_excel(f'H:\\Cache\\{category}_客户名称.xlsx', index=False)
+        output_file = os.path.join(output_dir, f'{category}_客户名称.xlsx')
+        matched.to_excel(output_file, index=False)
+        print(f"分类 '{category}': {len(matched)} 个客户，已保存到: {output_file}")
 
 if save_in_one_file:
     # 将未匹配到的数据写入最后一个标签页
     unmatched.to_excel(writer, sheet_name='未匹配客户名称', index=False)
     writer.close()
+    print(f"所有分类结果已保存到: {os.path.join(output_dir, '客户名称分类结果.xlsx')}")
 else:
     # 保存未匹配到的客户名称
-    unmatched.to_excel('H:\\Cache\\未匹配客户名称.xlsx', index=False)
+    output_file = os.path.join(output_dir, '未匹配客户名称.xlsx')
+    unmatched.to_excel(output_file, index=False)
+    print(f"未匹配客户名称已保存到: {output_file}")
+
+print(f"处理完成！输出目录: {output_dir}")

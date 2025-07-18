@@ -1631,7 +1631,7 @@ def file_to_database(
                                 insert_pos = i
                                 break
                             else:
-                                insert_pos = i + 1  # 修复：将i + a = 1改为i + 1
+                                insert_pos = i + 1
                         data_chunks.insert(insert_pos, (chunk_id, chunk_data))
                         
                         processed_rows += len(chunk_data)
