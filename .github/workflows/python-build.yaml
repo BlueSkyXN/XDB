@@ -1,4 +1,4 @@
-name: XLSX-split Building
+name: Multi-Platform Build
 
 on:
   push:
@@ -7,167 +7,196 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-XLSX-split:
+  # XLSX工具构建 (轻量级依赖)
+  build-xlsx-tools:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        build: [linux, windows]
         include:
-          - build: linux
-            os: ubuntu-22.04
-          - build: windows
-            os: windows-2019
+          # Linux builds
+          - os: ubuntu-22.04
+            arch: x64
+            platform: linux-x64
+          - os: ubuntu-22.04
+            arch: arm64
+            platform: linux-arm64
+          # Windows builds
+          - os: windows-2022
+            arch: x64
+            platform: windows-x64
+          # macOS builds
+          - os: macos-14
+            arch: arm64
+            platform: macos-arm64
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v3
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
-          architecture: 'x64'
+          python-version: '3.11'
+          architecture: ${{ matrix.arch }}
 
-      - name: Set commit message
-        id: set_commit
+      - name: Set commit version
+        id: version
         run: |
-          if [ "${{ matrix.os }}" == "ubuntu-22.04" ]; then
-            echo "COMMIT_MESSAGE=$(git log --format=%B -1)" >> $GITHUB_ENV
-          elif [ "${{ matrix.os }}" == "windows-2019" ]; then
-            commit_message=$(git log --format=%B -1)
-            echo "COMMIT_MESSAGE=$commit_message" >> $GITHUB_ENV
-          fi
+          VERSION=$(git log --format=%B -1 | head -1)
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
         shell: bash
-        env:
-          pythonLocation: /opt/hostedtoolcache/Python/3.10.11/x64
 
       - name: Install dependencies
         run: |
-          python -m pip install pyinstaller argparse openpyxl --ignore-installed
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller openpyxl argparse configparser
 
-      - name: Build executable
+      - name: Build XLSX-split
         run: |
-          pyinstaller --onefile --hidden-import csv,os,codecs,configparser,argparse,openpyxl --strip XLSX-split.py --distpath dist/${{ matrix.os }}
+          pyinstaller --onefile --hidden-import=csv,os,codecs,configparser,argparse,openpyxl --strip scripts/XLSX-split.py --distpath dist/${{ matrix.platform }}
 
-      - name: Upload artifact (Linux)
-        if: ${{ matrix.os == 'ubuntu-22.04' }}
-        uses: actions/upload-artifact@v3
+      - name: Build XLSX-SheetCutter  
+        run: |
+          pyinstaller --onefile --hidden-import=sys,os,openpyxl --strip scripts/XLSX-SheetCutter.py --distpath dist/${{ matrix.platform }}
+
+      - name: Build XLSX-SheetMerger
+        run: |
+          pyinstaller --onefile --hidden-import=sys,os,openpyxl --strip scripts/XLSX-SheetMerger.py --distpath dist/${{ matrix.platform }}
+
+      # 单独上传每个XLSX工具
+      - name: Upload XLSX-split
+        uses: actions/upload-artifact@v4
         with:
-          name: build_XLSX-split_${{ matrix.os }}_v${{ env.COMMIT_MESSAGE }}
-          path: dist/ubuntu-22.04/XLSX-split
+          name: xlsx-split-${{ matrix.platform }}-${{ steps.version.outputs.version }}
+          path: dist/${{ matrix.platform }}/XLSX-split*
 
-      - name: Upload artifact (Windows)
-        if: ${{ matrix.os == 'windows-2019' }}
-        uses: actions/upload-artifact@v3
+      - name: Upload XLSX-SheetCutter
+        uses: actions/upload-artifact@v4
         with:
-          name: build_XLSX-split_${{ matrix.os }}_v${{ env.COMMIT_MESSAGE }}
-          path: dist/windows-2019/XLSX-split.exe
+          name: xlsx-sheetcutter-${{ matrix.platform }}-${{ steps.version.outputs.version }}
+          path: dist/${{ matrix.platform }}/XLSX-SheetCutter*
 
-  build-XLSX-SheetCutter:
+      - name: Upload XLSX-SheetMerger
+        uses: actions/upload-artifact@v4
+        with:
+          name: xlsx-sheetmerger-${{ matrix.platform }}-${{ steps.version.outputs.version }}
+          path: dist/${{ matrix.platform }}/XLSX-SheetMerger*
+
+      # XLSX工具合集上传
+      - name: Upload XLSX Tools Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: xlsx-tools-bundle-${{ matrix.platform }}-${{ steps.version.outputs.version }}
+          path: dist/${{ matrix.platform }}/*
+
+  # XDB主程序构建 (重型依赖)
+  build-xdb:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        build: [linux, windows]
         include:
-          - build: linux
-            os: ubuntu-22.04
-          - build: windows
-            os: windows-2019
+          # Linux builds
+          - os: ubuntu-22.04
+            arch: x64
+            platform: linux-x64
+          - os: ubuntu-22.04
+            arch: arm64  
+            platform: linux-arm64
+          # Windows builds
+          - os: windows-2022
+            arch: x64
+            platform: windows-x64
+          # macOS builds
+          - os: macos-14
+            arch: arm64
+            platform: macos-arm64
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v3
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
-          architecture: 'x64'
+          python-version: '3.11'
+          architecture: ${{ matrix.arch }}
 
-      - name: Set commit message
-        id: set_commit
+      - name: Set commit version
+        id: version
         run: |
-          if [ "${{ matrix.os }}" == "ubuntu-22.04" ]; then
-            echo "COMMIT_MESSAGE=$(git log --format=%B -1)" >> $GITHUB_ENV
-          elif [ "${{ matrix.os }}" == "windows-2019" ]; then
-            commit_message=$(git log --format=%B -1)
-            echo "COMMIT_MESSAGE=$commit_message" >> $GITHUB_ENV
-          fi
+          VERSION=$(git log --format=%B -1 | head -1)
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
         shell: bash
-        env:
-          pythonLocation: /opt/hostedtoolcache/Python/3.10.11/x64
 
       - name: Install dependencies
         run: |
-          python -m pip install pyinstaller openpyxl --ignore-installed
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller pandas openpyxl pymysql tqdm psutil chardet
 
-      - name: Build executable
+      - name: Build XDB
         run: |
-          pyinstaller --onefile --hidden-import csv,os,codecs,configparser,openpyxl --strip XLSX-SheetCutter.py --distpath dist/${{ matrix.os }}
+          pyinstaller --onefile --hidden-import=pandas,openpyxl,pymysql,tqdm,psutil,chardet,concurrent.futures,multiprocessing --strip XDB.py --distpath dist/${{ matrix.platform }}
 
-      - name: Upload artifact (Linux)
-        if: ${{ matrix.os == 'ubuntu-22.04' }}
-        uses: actions/upload-artifact@v3
+      - name: Upload XDB
+        uses: actions/upload-artifact@v4
         with:
-          name: build_XLSX-SheetCutter_${{ matrix.os }}_v${{ env.COMMIT_MESSAGE }}
-          path: dist/ubuntu-22.04/XLSX-SheetCutter
+          name: xdb-${{ matrix.platform }}-${{ steps.version.outputs.version }}
+          path: dist/${{ matrix.platform }}/*
 
-      - name: Upload artifact (Windows)
-        if: ${{ matrix.os == 'windows-2019' }}
-        uses: actions/upload-artifact@v3
-        with:
-          name: build_XLSX-SheetCutter_${{ matrix.os }}_v${{ env.COMMIT_MESSAGE }}
-          path: dist/windows-2019/XLSX-SheetCutter.exe
-
-  build-XLSX-SheetMerger:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        build: [linux, windows]
-        include:
-          - build: linux
-            os: ubuntu-22.04
-          - build: windows
-            os: windows-2019
+  # 全平台合集打包
+  create-release-bundle:
+    needs: [build-xlsx-tools, build-xdb]
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v3
-        with:
-          python-version: '3.10'
-          architecture: 'x64'
-
-      - name: Set commit message
-        id: set_commit
+      - name: Set commit version
+        id: version
         run: |
-          if [ "${{ matrix.os }}" == "ubuntu-22.04" ]; then
-            echo "COMMIT_MESSAGE=$(git log --format=%B -1)" >> $GITHUB_ENV
-          elif [ "${{ matrix.os }}" == "windows-2019" ]; then
-            commit_message=$(git log --format=%B -1)
-            echo "COMMIT_MESSAGE=$commit_message" >> $GITHUB_ENV
-          fi
+          VERSION=$(git log --format=%B -1 | head -1)
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
         shell: bash
-        env:
-          pythonLocation: /opt/hostedtoolcache/Python/3.10.11/x64
 
-      - name: Install dependencies
-        run: |
-          python -m pip install pyinstaller openpyxl --ignore-installed
-
-      - name: Build executable
-        run: |
-          pyinstaller --onefile --hidden-import csv,os,codecs,configparser,openpyxl --strip XLSX-SheetMerger.py --distpath dist/${{ matrix.os }}
-
-      - name: Upload artifact (Linux)
-        if: ${{ matrix.os == 'ubuntu-22.04' }}
-        uses: actions/upload-artifact@v3
+      # 下载所有artifacts
+      - name: Download all XLSX tools
+        uses: actions/download-artifact@v4
         with:
-          name: build_XLSX-SheetMerger_${{ matrix.os }}_v${{ env.COMMIT_MESSAGE }}
-          path: dist/ubuntu-22.04/XLSX-SheetMerger
+          pattern: xlsx-tools-bundle-*
+          path: release-bundle/xlsx-tools/
+          merge-multiple: false
 
-      - name: Upload artifact (Windows)
-        if: ${{ matrix.os == 'windows-2019' }}
-        uses: actions/upload-artifact@v3
+      - name: Download all XDB builds
+        uses: actions/download-artifact@v4
         with:
-          name: build_XLSX-SheetMerger_${{ matrix.os }}_v${{ env.COMMIT_MESSAGE }}
-          path: dist/windows-2019/XLSX-SheetMerger.exe
+          pattern: xdb-*
+          path: release-bundle/xdb/
+          merge-multiple: false
+
+      # 创建完整发布包
+      - name: Create complete release bundle
+        run: |
+          mkdir -p complete-release
+          # 重新组织目录结构
+          for platform in linux-x64 linux-arm64 windows-x64 macos-arm64; do
+            mkdir -p "complete-release/$platform"
+            
+            # 复制XLSX工具
+            if [ -d "release-bundle/xlsx-tools/xlsx-tools-bundle-$platform-${{ steps.version.outputs.version }}" ]; then
+              cp -r "release-bundle/xlsx-tools/xlsx-tools-bundle-$platform-${{ steps.version.outputs.version }}/"* "complete-release/$platform/"
+            fi
+            
+            # 复制XDB
+            if [ -d "release-bundle/xdb/xdb-$platform-${{ steps.version.outputs.version }}" ]; then
+              cp -r "release-bundle/xdb/xdb-$platform-${{ steps.version.outputs.version }}/"* "complete-release/$platform/"
+            fi
+          done
+
+      - name: Upload Complete Release Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: xdb-complete-release-${{ steps.version.outputs.version }}
+          path: complete-release/*
