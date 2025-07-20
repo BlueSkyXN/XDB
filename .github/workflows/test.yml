@@ -1,0 +1,192 @@
+name: XDB Basic Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: testpass
+          MYSQL_DATABASE: testdb
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=3
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 设置Python环境
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: 安装依赖
+      run: pip install pandas openpyxl pymysql tqdm psutil chardet
+
+    - name: 创建测试数据
+      run: |
+        # 创建CSV测试文件
+        cat > test_data.csv << 'EOF'
+        id,name,age,salary,hire_date,active
+        1,张三,25,5500.50,2023-01-15,true
+        2,李四,30,7200.75,2022-05-20,false
+        3,王五,28,6800.00,2023-03-10,true
+        4,赵六,35,9500.25,2021-12-01,false
+        EOF
+        
+        # 创建Excel测试文件
+        python -c "
+        import openpyxl
+        from datetime import date
+        
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = '测试数据'
+        
+        # 标题行
+        headers = ['ID', '姓名', '年龄', '工资', '入职日期', '是否在职']
+        for col, header in enumerate(headers, 1):
+            ws.cell(row=1, column=col, value=header)
+        
+        # 数据行
+        data = [
+            [1, '张三', 25, 5500.50, date(2023, 1, 15), True],
+            [2, '李四', 30, 7200.75, date(2022, 5, 20), False],
+            [3, '王五', 28, 6800.00, date(2023, 3, 10), True],
+            [4, '赵六', 35, 9500.25, date(2021, 12, 1), False],
+        ]
+        
+        for row_idx, row_data in enumerate(data, 2):
+            for col_idx, value in enumerate(row_data, 1):
+                ws.cell(row=row_idx, column=col_idx, value=value)
+        
+        wb.save('test_data.xlsx')
+        print('Excel测试文件创建完成')
+        "
+
+    - name: 测试CSV转SQLite
+      run: |
+        python XDB.py test_data.csv \
+          --db-type sqlite \
+          --sqlite-path csv_test.db \
+          --target-table csv_data \
+          --mode overwrite
+        
+        # 验证结果
+        python -c "
+        import sqlite3
+        conn = sqlite3.connect('csv_test.db')
+        count = conn.execute('SELECT COUNT(*) FROM csv_data').fetchone()[0]
+        print(f'CSV->SQLite: {count}行数据')
+        assert count == 4, f'期望4行，实际{count}行'
+        
+        # 验证数据内容
+        row = conn.execute('SELECT name, age FROM csv_data WHERE id = 1').fetchone()
+        assert row[0] == '张三' and row[1] == 25, f'数据错误: {row}'
+        conn.close()
+        print('✓ CSV->SQLite测试通过')
+        "
+
+    - name: 测试Excel转SQLite
+      run: |
+        python XDB.py test_data.xlsx \
+          --db-type sqlite \
+          --sqlite-path excel_test.db \
+          --target-table excel_data \
+          --mode overwrite
+        
+        # 验证结果
+        python -c "
+        import sqlite3
+        conn = sqlite3.connect('excel_test.db')
+        count = conn.execute('SELECT COUNT(*) FROM excel_data').fetchone()[0]
+        print(f'Excel->SQLite: {count}行数据')
+        assert count == 4, f'期望4行，实际{count}行'
+        
+        # 验证数据内容
+        row = conn.execute('SELECT 姓名, 年龄 FROM excel_data WHERE ID = 1').fetchone()
+        assert row[0] == '张三' and row[1] == 25, f'数据错误: {row}'
+        conn.close()
+        print('✓ Excel->SQLite测试通过')
+        "
+
+    - name: 测试CSV转MySQL
+      run: |
+        python XDB.py test_data.csv \
+          --db-type mysql \
+          --mysql-host 127.0.0.1 \
+          --mysql-user root \
+          --mysql-password testpass \
+          --mysql-database testdb \
+          --target-table csv_mysql_data \
+          --mode overwrite
+        
+        # 验证结果
+        python -c "
+        import pymysql
+        conn = pymysql.connect(
+            host='127.0.0.1', user='root', 
+            password='testpass', database='testdb'
+        )
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM csv_mysql_data')
+        count = cursor.fetchone()[0]
+        print(f'CSV->MySQL: {count}行数据')
+        assert count == 4, f'期望4行，实际{count}行'
+        
+        # 验证数据内容
+        cursor.execute('SELECT name, age FROM csv_mysql_data WHERE id = 1')
+        row = cursor.fetchone()
+        assert row[0] == '张三' and row[1] == 25, f'数据错误: {row}'
+        conn.close()
+        print('✓ CSV->MySQL测试通过')
+        "
+
+    - name: 测试Excel转MySQL
+      run: |
+        python XDB.py test_data.xlsx \
+          --db-type mysql \
+          --mysql-host 127.0.0.1 \
+          --mysql-user root \
+          --mysql-password testpass \
+          --mysql-database testdb \
+          --target-table excel_mysql_data \
+          --mode overwrite
+        
+        # 验证结果
+        python -c "
+        import pymysql
+        conn = pymysql.connect(
+            host='127.0.0.1', user='root', 
+            password='testpass', database='testdb'
+        )
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM excel_mysql_data')
+        count = cursor.fetchone()[0]
+        print(f'Excel->MySQL: {count}行数据')
+        assert count == 4, f'期望4行，实际{count}行'
+        
+        # 验证数据内容
+        cursor.execute('SELECT 姓名, 年龄 FROM excel_mysql_data WHERE ID = 1')
+        row = cursor.fetchone()
+        assert row[0] == '张三' and row[1] == 25, f'数据错误: {row}'
+        conn.close()
+        print('✓ Excel->MySQL测试通过')
+        "
+
+    - name: 总结
+      run: echo "🎉 XDB基本功能测试全部通过！"
