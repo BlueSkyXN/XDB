@@ -35,7 +35,7 @@ jobs:
         python-version: '3.11'
 
     - name: 安装依赖
-      run: pip install pandas openpyxl pymysql tqdm psutil chardet
+      run: pip install pandas openpyxl pymysql tqdm psutil chardet cryptography
 
     - name: 创建测试数据
       run: |
