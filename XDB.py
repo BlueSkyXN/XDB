@@ -40,10 +40,144 @@ from datetime import datetime
 from openpyxl import load_workbook
 import getpass
 import pymysql
+from pymysql.cursors import DictCursor
 from contextlib import contextmanager
 from abc import ABC, abstractmethod
 import csv
 import chardet
+import math
+
+# SQL安全工具函数
+def validate_sql_identifier(name):
+    """验证SQL标识符安全性（表名、列名等）"""
+    if not name or not isinstance(name, str):
+        raise ValueError("SQL标识符不能为空")
+    
+    # 移除首尾空格
+    name = name.strip()
+    
+    # 长度限制
+    if len(name) > 64:
+        raise ValueError(f"SQL标识符过长（最大64字符）: {name}")
+    
+    # 只允许字母、数字、下划线、中文
+    import re
+    if not re.match(r'^[a-zA-Z_\u4e00-\u9fff][a-zA-Z0-9_\u4e00-\u9fff]*$', name):
+        raise ValueError(f"SQL标识符包含非法字符: {name}")
+    
+    # SQL关键字和危险字符黑名单
+    dangerous_patterns = [
+        # SQL关键字
+        'DROP', 'DELETE', 'UPDATE', 'INSERT', 'SELECT', 'ALTER', 'CREATE', 'TRUNCATE',
+        'UNION', 'EXEC', 'EXECUTE', 'DECLARE', 'CAST', 'CONVERT', 'MERGE',
+        # 危险字符和模式
+        ';', '--', '/*', '*/', 'XP_', 'SP_', 'OPENROWSET', 'OPENQUERY',
+        'BULK', 'LOAD_FILE', 'INTO OUTFILE', 'INTO DUMPFILE'
+    ]
+    
+    name_upper = name.upper()
+    for pattern in dangerous_patterns:
+        if pattern in name_upper:
+            raise ValueError(f"SQL标识符包含危险关键字或字符: {name}")
+    
+    return name
+
+def safe_sql_identifier(name):
+    """安全的SQL标识符处理"""
+    # 验证标识符
+    validated = validate_sql_identifier(name)
+    # 双重引号转义（防止引号逃逸）
+    return validated.replace('"', '""').replace("'", "''")
+
+def sanitize_table_name(raw_name):
+    """清理表名，确保SQL安全"""
+    if not raw_name:
+        return 'default_table'
+    
+    try:
+        # 先用现有的clean_table_name清理
+        cleaned = clean_table_name(raw_name)
+        # 再进行SQL安全验证
+        return safe_sql_identifier(cleaned)
+    except ValueError as e:
+        # 如果验证失败，生成安全的替代名
+        import hashlib
+        safe_hash = hashlib.md5(str(raw_name).encode()).hexdigest()[:8]
+        return f"table_{safe_hash}"
+
+def sanitize_column_name(raw_name):
+    """清理列名，确保SQL安全"""
+    if not raw_name:
+        return 'default_column'
+    
+    try:
+        # 基础清理
+        cleaned = str(raw_name).strip()
+        # 替换特殊字符
+        cleaned = re.sub(r'[^\w\u4e00-\u9fff]', '_', cleaned)
+        # 移除连续下划线
+        cleaned = re.sub(r'_+', '_', cleaned).strip('_')
+        # 确保以字母开头
+        if not cleaned or not (cleaned[0].isalpha() or '\u4e00' <= cleaned[0] <= '\u9fff'):
+            cleaned = 'col_' + cleaned
+        
+        # SQL安全验证
+        return safe_sql_identifier(cleaned[:64])
+    except ValueError as e:
+        # 如果验证失败，生成安全的替代名
+        import hashlib
+        safe_hash = hashlib.md5(str(raw_name).encode()).hexdigest()[:8]
+        return f"col_{safe_hash}"
+
+def validate_safe_path(file_path):
+    """验证文件路径是否安全，防止路径遍历攻击"""
+    if not file_path:
+        raise ValueError("文件路径不能为空")
+    
+    # 获取绝对路径并规范化
+    abs_path = os.path.abspath(file_path)
+    
+    # 检查危险模式
+    dangerous_patterns = ['..', '~', '$']
+    for pattern in dangerous_patterns:
+        if pattern in file_path:
+            raise ValueError(f"文件路径包含危险字符: {pattern}")
+    
+    # 检查是否尝试访问系统关键目录
+    forbidden_paths = [
+        '/etc', '/bin', '/sbin', '/usr/bin', '/usr/sbin',
+        '/System', '/Library', '/Applications',
+        'C:\\Windows', 'C:\\Program Files', 'C:\\System32'
+    ]
+    
+    for forbidden in forbidden_paths:
+        if abs_path.startswith(forbidden):
+            raise ValueError(f"不允许访问系统目录: {forbidden}")
+    
+    # 确保路径在当前工作目录或子目录中（可选的额外安全检查）
+    current_dir = os.getcwd()
+    if not abs_path.startswith(current_dir) and not os.path.isabs(file_path):
+        # 对于相对路径，确保解析后在安全范围内
+        if '..' in os.path.normpath(file_path):
+            raise ValueError("不允许使用相对路径遍历到父目录")
+    
+    return abs_path
+
+# 工具函数
+def is_nan_or_empty(value):
+    """检测值是否为NaN或空值（更可靠的检测）"""
+    if value is None:
+        return True
+    if isinstance(value, str) and value.strip() == '':
+        return True
+    if isinstance(value, float):
+        return math.isnan(value)
+    if hasattr(value, '__len__') and len(value) == 0:
+        return True
+    # 检测pandas的NaN类型
+    if str(value).lower() in ['nan', 'none', 'null']:
+        return True
+    return False
 
 # 配置日志
 def setup_logger(level=logging.INFO, log_file=None):
@@ -119,12 +253,35 @@ def detect_csv_properties(csv_path, sample_size=4096):
         with open(csv_path, 'rb') as f:
             sample = f.read(sample_size)
         
-        # 检测编码
+        # 检测编码（改进版，防御性编程）
         result = chardet.detect(sample)
-        encoding = result['encoding'] if result['confidence'] > 0.7 else 'utf-8'
         
-        # 使用检测到的编码读取文件样本
-        text_sample = sample.decode(encoding, errors='ignore')
+        # 防御性处理：chardet可能返回None或异常结果
+        if not result or not isinstance(result, dict):
+            result = {'encoding': None, 'confidence': 0.0}
+        
+        if result.get('confidence', 0) > 0.8 and result.get('encoding'):
+            encoding = result['encoding']
+        elif result.get('confidence', 0) > 0.5 and result.get('encoding') in ['utf-8', 'gbk', 'gb2312', 'gb18030', 'utf-16']:
+            encoding = result['encoding']
+        else:
+            # 尝试常见编码
+            encoding = None
+            for test_encoding in ['utf-8', 'gbk', 'gb2312', 'gb18030']:
+                try:
+                    sample.decode(test_encoding)
+                    encoding = test_encoding
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if not encoding:
+                encoding = 'utf-8'  # 最后的安全网
+        
+        logger.info(f"检测到编码: {encoding} (置信度: {result.get('confidence', 0):.2f})")
+        
+        # 使用检测到的编码读取文件样本（防御性编程）
+        text_sample = sample.decode(encoding or 'utf-8', errors='ignore')
         
         # 计算可能的分隔符
         sep_candidates = {
@@ -174,7 +331,93 @@ def detect_csv_properties(csv_path, sample_size=4096):
             'has_header': True
         }
 
+# 表名清理函数
+def clean_table_name(name):
+    """清理表名，确保符合数据库命名规范"""
+    if not name:
+        return 'T_default'
+    
+    # 移除特殊字符，保留中文、英文、数字、下划线
+    cleaned = re.sub(r'[^\w\u4e00-\u9fff]', '_', name)
+    # 移除连续的下划线
+    cleaned = re.sub(r'_+', '_', cleaned).strip('_')
+    # 确保以字母或中文开头
+    if not cleaned or not (cleaned[0].isalpha() or '\u4e00' <= cleaned[0] <= '\u9fff'):
+        cleaned = 'T_' + cleaned
+    # 限制长度
+    return cleaned[:64]
+
 # 数据类型检测
+def is_integer_value(value):
+    """检测值是否为整数（包括负数），包含溢出保护"""
+    try:
+        if isinstance(value, int):
+            # 检查整数范围，防止溢出
+            return -9223372036854775808 <= value <= 9223372036854775807  # 64位整数范围
+        if isinstance(value, str):
+            stripped_value = value.strip()
+            # 防止过长的字符串导致内存问题
+            if len(stripped_value) > 20:  # 合理的整数字符串长度限制
+                return False
+            parsed_int = int(stripped_value)
+            # 检查解析后的整数范围
+            return -9223372036854775808 <= parsed_int <= 9223372036854775807
+        return False
+    except (ValueError, TypeError, OverflowError):
+        return False
+
+def is_float_value(value):
+    """检测值是否为浮点数（包括科学计数法），排除整数"""
+    try:
+        if isinstance(value, float):
+            return True
+        if isinstance(value, int):
+            return False  # 整数不是浮点数
+        if isinstance(value, str):
+            # 支持科学计数法、负数、小数
+            value = value.strip()
+            if re.match(r'^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$', value):
+                # 避免精度丢失：先检查是否包含小数点或科学计数法
+                if '.' in value or 'e' in value.lower():
+                    try:
+                        parsed = float(value)
+                        # 对于大整数，使用字符串检查而非浮点数精度检查
+                        if abs(parsed) > 2**53:  # IEEE 754双精度限制
+                            return '.' in value and not value.rstrip('0').endswith('.')
+                        return not parsed.is_integer()
+                    except (ValueError, OverflowError):
+                        return False
+                return False  # 纯整数字符串不是浮点数
+        return False
+    except (ValueError, TypeError):
+        return False
+
+def is_date_value(value):
+    """检测值是否为日期（支持多种格式）"""
+    if isinstance(value, datetime):
+        return True
+    
+    if isinstance(value, str):
+        value = value.strip()
+        # 支持多种日期格式
+        date_patterns = [
+            r'^\d{4}-\d{1,2}-\d{1,2}$',                    # 2023-01-01
+            r'^\d{1,2}/\d{1,2}/\d{4}$',                    # 01/01/2023
+            r'^\d{4}/\d{1,2}/\d{1,2}$',                    # 2023/01/01
+            r'^\d{1,2}-\d{1,2}-\d{4}$',                    # 01-01-2023
+            r'^\d{4}-\d{1,2}-\d{1,2} \d{1,2}:\d{2}:\d{2}$', # 2023-01-01 12:00:00
+            r'^\d{1,2}/\d{1,2}/\d{4} \d{1,2}:\d{2}:\d{2}$', # 01/01/2023 12:00:00
+            r'^\d{4}\d{2}\d{2}$',                          # 20230101
+            r'^\d{1,2}-\w{3}-\d{4}$',                      # 01-Jan-2023
+            r'^\w{3} \d{1,2}, \d{4}$',                     # Jan 01, 2023
+        ]
+        
+        for pattern in date_patterns:
+            if re.match(pattern, value):
+                return True
+    
+    return False
+
 def detect_column_types(sample_data, headers, db_type='sqlite'):
     """分析样本数据，检测每列的数据类型，根据目标数据库类型返回适当的类型定义"""
     logger = logging.getLogger(__name__)
@@ -192,8 +435,13 @@ def detect_column_types(sample_data, headers, db_type='sqlite'):
     is_potential_pk = (len(first_col_values) == len(set(first_col_values)) 
                        and len(first_col_values) > 0)
     
-    # 转置样本数据，按列分析
-    max_cols = max(len(row) for row in sample_data if row)
+    # 转置样本数据，按列分析（边界条件保护）
+    valid_rows = [row for row in sample_data if row]
+    if not valid_rows:
+        # 如果没有有效数据，返回默认类型
+        return ['TEXT'] * len(headers) if db_type == 'sqlite' else ['VARCHAR(255)'] * len(headers)
+    
+    max_cols = max(len(row) for row in valid_rows)
     columns = [[] for _ in range(max_cols)]
     
     for row in sample_data:
@@ -208,33 +456,57 @@ def detect_column_types(sample_data, headers, db_type='sqlite'):
             if not non_empty:
                 # 默认字符串类型
                 column_type = 'TEXT' if db_type == 'sqlite' else 'VARCHAR(255)'
-            # 整数判断
-            elif all(isinstance(x, int) or (isinstance(x, str) and x.isdigit()) for x in non_empty):
-                if db_type == 'sqlite':
-                    column_type = ('INTEGER PRIMARY KEY' if i == 0 and is_potential_pk else 'INTEGER')
-                else:  # MySQL
-                    column_type = ('INT AUTO_INCREMENT PRIMARY KEY' if i == 0 and is_potential_pk else 'INT')
-            # 浮点数判断
-            elif all(isinstance(x, float) or (isinstance(x, str) and 
-                    re.match(r'^-?\d+(\.\d+)?$', str(x))) for x in non_empty):
-                column_type = 'REAL' if db_type == 'sqlite' else 'DOUBLE'
-            # 日期判断
-            elif all(isinstance(x, datetime) or (isinstance(x, str) and 
-                    any(re.match(pattern, str(x)) for pattern in 
-                        [r'\d{4}-\d{1,2}-\d{1,2}', r'\d{1,2}/\d{1,2}/\d{4}'])) 
-                    for x in non_empty):
-                column_type = 'DATE' if db_type == 'sqlite' else 'DATETIME'
-            # 布尔值判断
-            elif all(str(x).lower() in ('true', 'false', '0', '1', 'yes', 'no') for x in non_empty):
-                column_type = 'BOOLEAN' if db_type == 'sqlite' else 'TINYINT(1)'
-            # 长文本判断
-            elif any(isinstance(x, str) and len(x) > 255 for x in non_empty):
-                column_type = 'TEXT' if db_type == 'sqlite' else 'TEXT'
             else:
-                # 默认文本类型
-                max_length = max(len(str(x)) for x in non_empty) if non_empty else 255
-                max_length = min(max(max_length + 50, 100), 255)  # 为字符串预留一些空间，但不超过255
-                column_type = 'TEXT' if db_type == 'sqlite' else f'VARCHAR({max_length})'
+                # 优化的类型检测 - 单次遍历检测所有类型
+                type_counters = {
+                    'integer': 0,
+                    'float': 0, 
+                    'date': 0,
+                    'boolean': 0,
+                    'long_text': 0
+                }
+                max_str_length = 0
+                total_values = len(non_empty)
+                
+                # 单次遍历，检测所有类型
+                for x in non_empty:
+                    str_x = str(x)
+                    str_len = len(str_x)
+                    max_str_length = max(max_str_length, str_len)
+                    
+                    # 检测类型（优化顺序：从最严格到最宽松）
+                    if is_integer_value(x):
+                        type_counters['integer'] += 1
+                    elif is_float_value(x):
+                        type_counters['float'] += 1
+                    elif is_date_value(x):
+                        type_counters['date'] += 1
+                    elif str_x.lower() in ('true', 'false', '0', '1', 'yes', 'no'):
+                        type_counters['boolean'] += 1
+                    
+                    if isinstance(x, str) and str_len > 255:
+                        type_counters['long_text'] += 1
+                
+                # 根据统计结果确定最佳类型（95%一致性阈值）
+                threshold = max(1, int(total_values * 0.95))
+                
+                if type_counters['integer'] >= threshold:
+                    if db_type == 'sqlite':
+                        column_type = ('INTEGER PRIMARY KEY' if i == 0 and is_potential_pk else 'INTEGER')
+                    else:  # MySQL
+                        column_type = ('INT AUTO_INCREMENT PRIMARY KEY' if i == 0 and is_potential_pk else 'INT')
+                elif type_counters['float'] >= threshold:
+                    column_type = 'REAL' if db_type == 'sqlite' else 'DOUBLE'
+                elif type_counters['date'] >= threshold:
+                    column_type = 'DATE' if db_type == 'sqlite' else 'DATETIME'
+                elif type_counters['boolean'] >= threshold:
+                    column_type = 'BOOLEAN' if db_type == 'sqlite' else 'TINYINT(1)'
+                elif type_counters['long_text'] > 0:
+                    column_type = 'TEXT' if db_type == 'sqlite' else 'TEXT'
+                else:
+                    # 优化的VARCHAR长度计算
+                    safe_length = min(max(max_str_length + 50, 100), 255)
+                    column_type = 'TEXT' if db_type == 'sqlite' else f'VARCHAR({safe_length})'
                 
             detected_types.append(column_type)
         except Exception as e:
@@ -255,9 +527,9 @@ def get_excel_info(excel_path, sheet_name=None):
     logger = logging.getLogger(__name__)
     
     try:
-        # 获取所有工作表
-        xls = pd.ExcelFile(excel_path)
-        sheet_names = xls.sheet_names
+        # 获取所有工作表 - 优化资源管理
+        with pd.ExcelFile(excel_path) as xls:
+            sheet_names = xls.sheet_names
         
         if sheet_name is not None and sheet_name not in sheet_names:
             if isinstance(sheet_name, int) and 0 <= sheet_name < len(sheet_names):
@@ -269,37 +541,54 @@ def get_excel_info(excel_path, sheet_name=None):
             sheet_name = sheet_names[0]
         
         # 使用openpyxl获取工作表信息，避免加载全部数据
-        wb = load_workbook(excel_path, read_only=True)
-        ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
-        
-        # 获取表头行
-        header_row = next(ws.rows)
-        header = [cell.value for cell in header_row]
-        
-        # 清理表头
-        cleaned_header = []
-        for i, col in enumerate(header):
-            if col is None or str(col).strip() == '':
-                col = f"Column_{i+1}"
-            else:
-                # 替换非法字符
-                col = str(col).strip().replace('\n', '_').replace('\r', '_')
-                col = ''.join(c if c.isalnum() or c in ['_', '.'] else '_' for c in col)
-            
-            # 确保唯一性
-            while col in cleaned_header:
-                col = f"{col}_dup"
-            cleaned_header.append(col)
-        
-        # 估计行数
+        wb = None
         try:
-            estimated_rows = ws.max_row - 1
-        except:
-            # 如果max_row不可靠，使用文件大小估算
-            file_size_mb = os.path.getsize(excel_path) / (1024*1024)
-            estimated_rows = int(file_size_mb * 2000)  # 粗略估算每MB约2000行
-        
-        wb.close()
+            wb = load_workbook(excel_path, read_only=True)
+            ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
+            
+            # 检查工作表是否有效
+            if ws is None:
+                raise ValueError(f"无法获取工作表: {sheet_name}")
+            
+            # 获取表头行
+            header_row = next(ws.rows)
+            header = [cell.value for cell in header_row]
+            
+            # 清理表头（SQL安全版）
+            cleaned_header = []
+            for i, col in enumerate(header):
+                if col is None or str(col).strip() == '':
+                    col = f"Column_{i+1}"
+                else:
+                    # 使用安全的列名清理
+                    col = sanitize_column_name(str(col))
+                
+                # 确保唯一性
+                base_col = col
+                counter = 1
+                while col in cleaned_header:
+                    col = f"{base_col}_{counter}"
+                    counter += 1
+                cleaned_header.append(col)
+            
+            # 估计行数
+            try:
+                estimated_rows = ws.max_row - 1
+            except Exception as e:
+                logger.debug(f"Excel行数估算失败: {e}")
+                # 使用文件大小估算
+                try:
+                    file_size_mb = os.path.getsize(excel_path) / (1024*1024)
+                    estimated_rows = int(file_size_mb * 2000)  # 粗略估算每MB约2000行
+                except (OSError, ZeroDivisionError):
+                    estimated_rows = 1000  # 保守估算
+        finally:
+            # 确保资源总是被释放
+            if wb is not None:
+                try:
+                    wb.close()
+                except Exception as e:
+                    logger.warning(f"关闭Excel工作簿失败: {e}")
         
         return {
             'sheet_names': sheet_names,
@@ -347,7 +636,7 @@ def get_csv_info(csv_path, csv_props=None):
                 # 使用检测到的分隔符创建自定义方言
                 class CustomDialect(csv.Dialect):
                     delimiter = sep
-                    quotechar = quotechar
+                    quotechar = csv_props['quotechar']  # 直接从字典获取
                     doublequote = True
                     skipinitialspace = True
                     lineterminator = '\r\n'
@@ -376,19 +665,21 @@ def get_csv_info(csv_path, csv_props=None):
                     # 如果文件为空，提供一个默认表头
                     raw_headers = ["Column_1"]
             
-            # 清理表头
+            # 清理表头（SQL安全版）
             cleaned_header = []
             for i, col in enumerate(raw_headers):
                 if col is None or str(col).strip() == '':
                     col = f"Column_{i+1}"
                 else:
-                    # 替换非法字符
-                    col = str(col).strip().replace('\n', '_').replace('\r', '_')
-                    col = ''.join(c if c.isalnum() or c in ['_', '.'] else '_' for c in col)
+                    # 使用安全的列名清理
+                    col = sanitize_column_name(str(col))
                 
                 # 确保唯一性
+                base_col = col
+                counter = 1
                 while col in cleaned_header:
-                    col = f"{col}_dup"
+                    col = f"{base_col}_{counter}"
+                    counter += 1
                 cleaned_header.append(col)
             
             # 估计行数
@@ -412,7 +703,12 @@ def get_csv_info(csv_path, csv_props=None):
                 
                 if line_count > 0:
                     avg_line_length = total_chars / line_count
-                    estimated_rows = int(file_size / avg_line_length)
+                    # 防止除零错误：确保avg_line_length不为0
+                    if avg_line_length > 0:
+                        estimated_rows = int(file_size / avg_line_length)
+                    else:
+                        # 如果平均行长度为0，使用保守估计
+                        estimated_rows = min(1000, max(1, file_size // 100))  # 假设每行至少100字节
                 else:
                     estimated_rows = 0
             else:
@@ -450,6 +746,10 @@ def get_sample_data(file_path, sheet_name=None, sample_size=100, file_type=None,
                 sheet_name=sheet_name,
                 nrows=sample_size + 1  # 读取部分数据
             )
+            # 确保返回的是DataFrame而不是字典
+            if isinstance(df_sample, dict):
+                # 如果返回字典，取第一个工作表
+                df_sample = list(df_sample.values())[0]
         else:  # CSV文件
             # 如果未提供CSV属性，则进行检测
             if csv_props is None:
@@ -473,8 +773,18 @@ def get_sample_data(file_path, sheet_name=None, sample_size=100, file_type=None,
         # 移除完全为空的行
         df_sample = df_sample.dropna(how='all')
         
-        # 直接返回所有数据行（DataFrame里已经不包含表头行那一行）
-        return df_sample.values.tolist(), df_sample.columns.tolist()
+        # 优化内存使用 - 提取数据后立即清理
+        try:
+            # 先提取列名
+            columns = df_sample.columns.tolist()
+            # 使用迭代器减少内存峰值，避免创建完整副本
+            data_rows = [list(row) for row in df_sample.itertuples(index=False, name=None)]
+            return data_rows, columns
+        finally:
+            # 显式清理DataFrame内存
+            del df_sample
+            import gc
+            gc.collect()
     except Exception as e:
         logger.error(f"获取样本数据失败: {str(e)}")
         raise
@@ -493,21 +803,28 @@ def get_merged_cells_info(file_path, sheet_name, file_type=None):
             return []
         
         # 读取工作簿以获取合并单元格信息
-        wb = load_workbook(file_path, read_only=False, data_only=True)
-        ws = wb[sheet_name]
-        
-        # 获取所有合并单元格范围
-        merged_ranges = []
-        for merged_cell_range in ws.merged_cells.ranges:
-            min_row, min_col, max_row, max_col = (
-                merged_cell_range.min_row, 
-                merged_cell_range.min_col, 
-                merged_cell_range.max_row,
-                merged_cell_range.max_col
-            )
-            merged_ranges.append((min_row, min_col, max_row, max_col))
-        
-        wb.close()
+        wb = None
+        try:
+            wb = load_workbook(file_path, read_only=False, data_only=True)
+            ws = wb[sheet_name]
+            
+            # 获取所有合并单元格范围
+            merged_ranges = []
+            for merged_cell_range in ws.merged_cells.ranges:
+                min_row, min_col, max_row, max_col = (
+                    merged_cell_range.min_row, 
+                    merged_cell_range.min_col, 
+                    merged_cell_range.max_row,
+                    merged_cell_range.max_col
+                )
+                merged_ranges.append((min_row, min_col, max_row, max_col))
+        finally:
+            # 确保资源总是被释放
+            if wb is not None:
+                try:
+                    wb.close()
+                except Exception as e:
+                    logger.warning(f"关闭Excel工作簿失败: {e}")
         
         return merged_ranges
     except Exception as e:
@@ -519,13 +836,23 @@ def process_chunk(args):
     chunk_id, file_path, sheet_name, skiprows, nrows, headers, merged_ranges, file_type, csv_props, transform_rules = args
     # 注意:这里增加了transform_rules参数!
     
-    # 每个进程使用独立的日志记录器
-    worker_logger = logging.getLogger(f"worker_{os.getpid()}")
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    worker_logger.addHandler(handler)
-    worker_logger.setLevel(logging.INFO)
+    # 每个进程使用独立的日志记录器（并发安全增强版）
+    import threading
+    worker_id = f"worker_{os.getpid()}_{threading.get_ident()}"
+    worker_logger = logging.getLogger(worker_id)
+    
+    # 使用更安全的handler检查，避免竞态条件
+    if not worker_logger.hasHandlers():
+        # 双重检查锁定模式（适用于多进程环境）
+        if not worker_logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            # 设置最小日志级别，避免过多输出
+            handler.setLevel(logging.WARNING)
+            worker_logger.addHandler(handler)
+            worker_logger.setLevel(logging.WARNING)
+            worker_logger.propagate = False  # 防止向父日志器传播
     
     try:
         if file_type == 'excel':
@@ -563,8 +890,8 @@ def process_chunk(args):
                                     for c in range(df_min_col, df_max_col + 1):
                                         if r < df_chunk.shape[0] and c < df_chunk.shape[1]:
                                             df_chunk.iloc[r, c] = cell_value
-                            except:
-                                pass
+                            except Exception as e:
+                                worker_logger.warning(f"合并单元格处理失败，区域({chunk_min_row},{df_min_col})-({chunk_max_row},{df_max_col}): {e}")
         else:  # CSV文件处理
             # 使用pandas读取CSV块
             df_chunk = pd.read_csv(
@@ -581,30 +908,80 @@ def process_chunk(args):
         # 移除完全为空的行
         df_chunk = df_chunk.dropna(how='all')
         
-        # 处理数据
-        processed_data = []
-        for row in df_chunk.values.tolist():
-            # 确保行长度与列头匹配
-            processed_row = []
-            for i in range(len(headers)):
-                if i < len(row):
-                    cell_value = row[i]
-                else:
-                    cell_value = None
-                
-                # 应用字段转换规则
-                if transform_rules and headers[i] in transform_rules:
-                    cell_value = apply_column_transformation(cell_value, transform_rules[headers[i]])
-                
-                # 处理 NaN 和空值
-                if cell_value is None or (isinstance(cell_value, float) and cell_value != cell_value) or (isinstance(cell_value, str) and cell_value.strip() == ''):
-                    processed_row.append(None)
-                else:
-                    if isinstance(cell_value, str):
-                        cell_value = cell_value.replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
-                    processed_row.append(cell_value)
+        # 优化的数据处理 - 使用pandas向量化操作
+        try:
+            # 确保DataFrame列数与headers匹配
+            if len(df_chunk.columns) > len(headers):
+                df_chunk = df_chunk.iloc[:, :len(headers)]
+            elif len(df_chunk.columns) < len(headers):
+                # 添加缺失的列
+                for i in range(len(df_chunk.columns), len(headers)):
+                    df_chunk[f'temp_col_{i}'] = None
             
-            processed_data.append(tuple(processed_row))
+            # 重新设置列名以匹配headers
+            df_chunk.columns = headers[:len(df_chunk.columns)]
+            
+            # 应用列转换规则（向量化操作）
+            if transform_rules:
+                for header in headers:
+                    if header in transform_rules and header in df_chunk.columns:
+                        df_chunk[header] = df_chunk[header].apply(
+                            lambda x: apply_column_transformation(x, transform_rules[header])
+                        )
+            
+            # 向量化字符串清理（仅对字符串列）
+            import unicodedata
+            def clean_string_vectorized(x):
+                if pd.isna(x) or not isinstance(x, str):
+                    return x
+                # 快速清理控制字符
+                x = x.replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
+                x = x.replace('\t', ' ').replace('\f', ' ').replace('\v', ' ')
+                x = x.replace('\b', '').replace('\a', '')
+                # Unicode字符清理
+                return ''.join(char for char in x 
+                             if unicodedata.category(char) not in ('Cc', 'Cf') 
+                             or char in ' \t')
+            
+            # 对所有字符串列应用清理
+            string_cols = df_chunk.select_dtypes(include=['object']).columns
+            for col in string_cols:
+                df_chunk[col] = df_chunk[col].apply(clean_string_vectorized)
+            
+            # 处理NaN值 - 使用pandas的优化方法
+            df_chunk = df_chunk.where(pd.notnull(df_chunk), None)
+            
+            # 转换为元组列表（最后一步才转换以减少内存使用）
+            processed_data = [tuple(row) for row in df_chunk.values]
+            
+            # 显式清理DataFrame内存
+            del df_chunk
+            import gc
+            gc.collect()
+            
+        except Exception as e:
+            # 回退到原始方法以确保兼容性
+            worker_logger.warning(f"向量化处理失败，回退到行级处理: {e}")
+            processed_data = []
+            for row in df_chunk.values.tolist():
+                processed_row = []
+                for i in range(len(headers)):
+                    cell_value = row[i] if i < len(row) else None
+                    if transform_rules and headers[i] in transform_rules:
+                        cell_value = apply_column_transformation(cell_value, transform_rules[headers[i]])
+                    if is_nan_or_empty(cell_value):
+                        processed_row.append(None)
+                    else:
+                        if isinstance(cell_value, str):
+                            import unicodedata
+                            cell_value = cell_value.replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
+                            cell_value = cell_value.replace('\t', ' ').replace('\f', ' ').replace('\v', ' ')
+                            cell_value = cell_value.replace('\b', '').replace('\a', '')
+                            cell_value = ''.join(char for char in cell_value 
+                                               if unicodedata.category(char) not in ('Cc', 'Cf') 
+                                               or char in ' \t')
+                        processed_row.append(cell_value)
+                processed_data.append(tuple(processed_row))
         
         return chunk_id, processed_data
     except Exception as e:
@@ -614,6 +991,28 @@ def process_chunk(args):
 # 数据库抽象基类
 class Database(ABC):
     """数据库操作抽象基类"""
+    
+    def ensure_connection(self):
+        """确保数据库连接有效，增强错误处理"""
+        if not hasattr(self, 'conn') or self.conn is None:
+            try:
+                self.connect()
+            except Exception as e:
+                raise ConnectionError(f"无法建立数据库连接: {str(e)}")
+        
+        if self.conn is None:
+            raise ConnectionError("数据库连接失败，连接对象为None")
+        
+        return self.conn
+    
+    def __del__(self):
+        """析构函数，确保资源清理"""
+        try:
+            if hasattr(self, 'conn') and self.conn is not None:
+                self.disconnect()
+        except Exception:
+            # 忽略析构函数中的异常，避免影响程序退出
+            pass
     
     @abstractmethod
     def connect(self):
@@ -678,10 +1077,20 @@ class SQLiteDatabase(Database):
     def connect(self):
         """连接到SQLite数据库"""
         try:
-            # 确保输出目录存在（如果真的有目录）
-            db_dir = os.path.dirname(self.db_path)
-            if db_dir:
-                os.makedirs(db_dir, exist_ok=True)
+            # 确保输出目录存在（如果真的有目录），包含安全检查
+            try:
+                # 验证数据库路径安全性
+                safe_db_path = validate_safe_path(self.db_path)
+                self.db_path = safe_db_path  # 使用安全验证后的路径
+                
+                db_dir = os.path.dirname(self.db_path)
+                if db_dir:
+                    # 验证目录路径的安全性
+                    validate_safe_path(db_dir)
+                    os.makedirs(db_dir, exist_ok=True)
+            except ValueError as e:
+                self.logger.error(f"数据库路径安全验证失败: {e}")
+                raise ValueError(f"不安全的数据库路径: {e}")
             
             # 创建连接
             self.conn = sqlite3.connect(self.db_path)
@@ -692,13 +1101,26 @@ class SQLiteDatabase(Database):
             self.conn.execute('PRAGMA cache_size = 100000')
             self.conn.execute('PRAGMA temp_store = MEMORY')
             
-            # 动态设置内存映射大小
-            available_memory = psutil.virtual_memory().available
-            mmap_size = min(int(available_memory * 0.5), 30000000000)  
-            self.conn.execute(f'PRAGMA mmap_size = {mmap_size}')
+            # 动态设置内存映射大小（更安全的限制）
+            try:
+                available_memory = psutil.virtual_memory().available
+                if available_memory is None or available_memory <= 0:
+                    self.logger.warning("无法获取可用内存信息，使用默认内存映射大小")
+                    mmap_size = 268435456  # 256MB 默认值
+                else:
+                    # 限制内存映射为可用内存的10%，最大256MB（更保守）
+                    max_safe_mmap = min(int(available_memory * 0.1), 268435456)  # 256MB
+                    mmap_size = max(max_safe_mmap, 67108864)  # 最小64MB
+                
+                # 使用参数化查询防止SQL注入
+                self.conn.execute('PRAGMA mmap_size = ?', (mmap_size,))
+            except Exception as e:
+                self.logger.warning(f"设置内存映射大小失败: {e}，使用默认设置")
+                mmap_size = 268435456  # 256MB 默认值
+                self.conn.execute('PRAGMA mmap_size = ?', (mmap_size,))
             
             self.logger.info(f"已连接到SQLite数据库: {self.db_path}")
-            self.logger.info(f"已设置内存映射大小: {mmap_size / (1024**3):.1f} GB")
+            self.logger.info(f"已设置内存映射大小: {mmap_size / (1024**3):.1f} GB (可用内存: {available_memory / (1024**3):.1f} GB)")
             
             return self.conn
         except Exception as e:
@@ -723,13 +1145,15 @@ class SQLiteDatabase(Database):
     
     def drop_table(self, table_name):
         """删除表"""
-        if not self.conn:
-            self.connect()
-        
         try:
-            self.conn.execute(f'DROP TABLE IF EXISTS "{table_name}"')
-            self.conn.commit()
-            self.logger.info(f"已删除表: {table_name}")
+            # 确保连接有效，增强错误处理
+            conn = self.ensure_connection()
+            
+            # 使用严格的表名验证防止SQL注入
+            safe_table_name = sanitize_table_name(table_name)
+            conn.execute(f'DROP TABLE IF EXISTS "{safe_table_name}"')
+            conn.commit()
+            self.logger.info(f"已删除表: {safe_table_name}")
             return True
         except Exception as e:
             self.logger.error(f"删除表 {table_name} 出错: {str(e)}")
@@ -742,7 +1166,9 @@ class SQLiteDatabase(Database):
         
         try:
             cursor = self.conn.cursor()
-            cursor.execute(f"PRAGMA table_info(\"{table_name}\")")
+            # 使用严格的表名验证防止SQL注入
+            safe_table_name = sanitize_table_name(table_name)
+            cursor.execute(f"PRAGMA table_info(\"{safe_table_name}\")")
             columns = cursor.fetchall()
             
             # SQLite PRAGMA table_info 返回的格式: (cid, name, type, notnull, dflt_value, pk)
@@ -823,8 +1249,15 @@ class SQLiteDatabase(Database):
             ) VALUES ({placeholders})
             '''
             
-            # 开始一个事务
-            with self.conn:
+            # 显式事务管理，提供更好的控制和错误处理
+            cursor = self.conn.cursor()
+            try:
+                # 开始事务
+                cursor.execute("BEGIN TRANSACTION")
+                
+                batch_size = 0
+                max_batch_size = 50000  # 批量提交阈值
+                
                 for chunk_data in data_chunks:
                     if chunk_data:
                         # 如果有字段映射，需要重新组织数据
@@ -836,17 +1269,38 @@ class SQLiteDatabase(Database):
                                 for i, h in enumerate(headers):
                                     if h in field_mapping:
                                         val = row[i]
-                                        # 检查是否为 NaN 值
-                                        if isinstance(val, float) and (val != val):
+                                        # 使用更准确的NaN检测方法
+                                        if is_nan_or_empty(val):
                                             filtered_row.append(None)
                                         else:
                                             filtered_row.append(val)
                                 filtered_data.append(tuple(filtered_row))
-                            self.conn.executemany(insert_sql, filtered_data)
+                            cursor.executemany(insert_sql, filtered_data)
                             total_rows += len(filtered_data)
+                            batch_size += len(filtered_data)
                         else:
-                            self.conn.executemany(insert_sql, chunk_data)
+                            cursor.executemany(insert_sql, chunk_data)
                             total_rows += len(chunk_data)
+                            batch_size += len(chunk_data)
+                        
+                        # 批量提交策略：避免事务过大
+                        if batch_size >= max_batch_size:
+                            cursor.execute("COMMIT")
+                            cursor.execute("BEGIN TRANSACTION")
+                            batch_size = 0
+                
+                # 提交剩余的数据
+                cursor.execute("COMMIT")
+                
+            except Exception as e:
+                # 发生错误时回滚事务
+                try:
+                    cursor.execute("ROLLBACK")
+                except:
+                    pass  # 回滚失败也不要抛出异常
+                raise e
+            finally:
+                cursor.close()
             
             self.logger.info(f"成功插入 {total_rows} 行数据到SQLite表 '{table_name}'")
             return total_rows
@@ -876,13 +1330,16 @@ class SQLiteDatabase(Database):
             index_candidates = index_candidates[:max_indices]
             
             # 创建索引
+            safe_table_name = sanitize_table_name(table_name)
             for idx, (_, col) in enumerate(index_candidates):
-                idx_name = f"idx_{table_name}_{idx}"
-                self.conn.execute(f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON "{table_name}" ("{col}")')
-                self.logger.info(f"创建SQLite索引: {idx_name} 在列 '{col}'")
+                # 使用安全的列名和表名
+                safe_col = sanitize_column_name(col)
+                idx_name = f"idx_{safe_table_name}_{idx}"
+                self.conn.execute(f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON "{safe_table_name}" ("{safe_col}")')
+                self.logger.info(f"创建SQLite索引: {idx_name} 在列 '{safe_col}'")
             
             self.conn.commit()
-            self.logger.info(f"为SQLite表 '{table_name}' 创建了 {len(index_candidates)} 个索引")
+            self.logger.info(f"为SQLite表 '{safe_table_name}' 创建了 {len(index_candidates)} 个索引")
             return True
         except Exception as e:
             self.logger.error(f"创建SQLite索引出错: {str(e)}")
@@ -921,12 +1378,14 @@ class SQLiteDatabase(Database):
             
             for table in tables:
                 table_name = table[0]
+                # 使用安全的表名验证（即使数据来自数据库本身）
+                safe_table_name = sanitize_table_name(table_name)
                 # 获取行数
-                cursor.execute(f"SELECT COUNT(*) FROM \"{table_name}\"")
+                cursor.execute(f"SELECT COUNT(*) FROM \"{safe_table_name}\"")
                 row_count = cursor.fetchone()[0]
                 
                 # 获取列信息
-                cursor.execute(f"PRAGMA table_info(\"{table_name}\")")
+                cursor.execute(f"PRAGMA table_info(\"{safe_table_name}\")")
                 columns = cursor.fetchall()
                 
                 table_info = {
@@ -971,15 +1430,27 @@ class MySQLDatabase(Database):
                 database=self.database,
                 charset=self.charset,
                 autocommit=False,
-                cursorclass=pymysql.cursors.DictCursor  # 直接在连接参数中指定
+                cursorclass=DictCursor  # 直接在连接参数中指定
             )
             
-            # 优化设置 - 适当调整缓冲区大小
+            # 优化设置 - 保存原始安全配置并谨慎调整
             with self.conn.cursor() as cursor:
                 cursor.execute("SET autocommit = 0")
+                # 保存原始安全设置以便稍后恢复
+                cursor.execute("SELECT @@unique_checks, @@foreign_key_checks")
+                original_settings = cursor.fetchone()
+                if original_settings and len(original_settings) >= 2:
+                    self._original_unique_checks = original_settings['@@unique_checks']
+                    self._original_foreign_key_checks = original_settings['@@foreign_key_checks']
+                else:
+                    self._original_unique_checks = 1
+                    self._original_foreign_key_checks = 1
+                
+                # 仅在批量导入时临时禁用，并记录警告
+                self.logger.warning("临时禁用MySQL安全检查以提升导入性能，导入完成后将自动恢复")
                 cursor.execute("SET unique_checks = 0")
                 cursor.execute("SET foreign_key_checks = 0")
-                cursor.execute("SET sql_mode = 'NO_ENGINE_SUBSTITUTION'")
+                cursor.execute("SET sql_mode = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'")
             
             self.logger.info(f"已连接到MySQL数据库: {self.host}:{self.port}/{self.database}")
             return self.conn
@@ -990,18 +1461,25 @@ class MySQLDatabase(Database):
     def disconnect(self):
         """断开MySQL连接"""
         if self.conn:
-            # 恢复默认设置
+            # 恢复原始安全设置
             try:
                 with self.conn.cursor() as cursor:
                     cursor.execute("SET autocommit = 1")
-                    cursor.execute("SET unique_checks = 1")
-                    cursor.execute("SET foreign_key_checks = 1")
+                    # 恢复保存的原始安全设置
+                    unique_check_val = getattr(self, '_original_unique_checks', 1)
+                    foreign_key_val = getattr(self, '_original_foreign_key_checks', 1)
+                    cursor.execute(f"SET unique_checks = {unique_check_val}")
+                    cursor.execute(f"SET foreign_key_checks = {foreign_key_val}")
+                    self.logger.info("MySQL安全检查已恢复到原始设置")
                 self.conn.commit()
-            except:
-                pass
-                
-            self.conn.close()
-            self.conn = None
+            except Exception as e:
+                self.logger.warning(f"MySQL连接恢复设置失败，继续关闭连接: {e}")
+            finally:
+                try:
+                    self.conn.close()
+                except Exception as e:
+                    self.logger.error(f"MySQL连接关闭失败: {e}")
+                self.conn = None
             self.logger.info("已断开MySQL数据库连接")
     
     def table_exists(self, table_name):
@@ -1024,10 +1502,12 @@ class MySQLDatabase(Database):
             self.connect()
         
         try:
+            # 使用安全的表名验证防止SQL注入
+            safe_table_name = sanitize_table_name(table_name)
             with self.conn.cursor() as cursor:
-                cursor.execute(f"DROP TABLE IF EXISTS `{table_name}`")
+                cursor.execute(f"DROP TABLE IF EXISTS `{safe_table_name}`")
             self.conn.commit()
-            self.logger.info(f"已删除MySQL表: {table_name}")
+            self.logger.info(f"已删除MySQL表: {safe_table_name}")
             return True
         except Exception as e:
             self.logger.error(f"删除MySQL表 {table_name} 出错: {str(e)}")
@@ -1137,52 +1617,69 @@ class MySQLDatabase(Database):
             # 分批处理，避免过大的事务
             batch_size = 5000  # 每个批次的最大行数
             
-            with self.conn.cursor() as cursor:
+            # 优化：预计算字段映射索引
+            if field_mapping:
+                mapped_indices = [i for i, h in enumerate(headers) if h in field_mapping]
+                self.logger.info(f"字段映射优化：从{len(headers)}列优化到{len(mapped_indices)}列")
+            else:
+                mapped_indices = None
+            
+            # 快速NaN检测函数
+            def is_nan_fast(val):
+                return val is None or (isinstance(val, float) and val != val) or pd.isna(val)
+            
+            # 确保连接有效，增强错误处理
+            conn = self.ensure_connection()
+            with conn.cursor() as cursor:
+                # 合并所有数据块以减少循环层级
+                all_data = []
                 for chunk_data in data_chunks:
                     if not chunk_data:
                         continue
-                        
-                    # 如果有字段映射，需要重新组织数据
-                    if field_mapping:
-                        filtered_data = []
-                        for row in chunk_data:
-                            # 只保留映射中的字段数据，并按映射后的顺序组织
-                            filtered_row = []
-                            for i, h in enumerate(headers):
-                                if h in field_mapping:
-                                    val = row[i]
-                                    # 检查是否为 NaN 值
-                                    if isinstance(val, float) and (val != val):
-                                        filtered_row.append(None)
-                                    else:
-                                        filtered_row.append(val)
-                            filtered_data.append(tuple(filtered_row))
-                    else:
-                        # 处理所有字段的 NaN 值
-                        filtered_data = []
-                        for row in chunk_data:
-                            processed_row = []
-                            for val in row:
-                                if isinstance(val, float) and (val != val):
-                                    processed_row.append(None)
-                                else:
-                                    processed_row.append(val)
-                            filtered_data.append(tuple(processed_row))
+                    all_data.extend(chunk_data)
+                
+                if not all_data:
+                    self.logger.warning("没有数据需要插入到MySQL")
+                    return 0
+                
+                # 优化的数据处理 - 单次遍历
+                if field_mapping and mapped_indices:
+                    # 使用预计算的索引，避免每行查找
+                    filtered_data = [
+                        tuple(None if is_nan_fast(row[i]) else row[i] for i in mapped_indices)
+                        for row in all_data if len(row) > max(mapped_indices)
+                    ]
+                else:
+                    # 处理所有字段的NaN值 - 向量化处理
+                    filtered_data = [
+                        tuple(None if is_nan_fast(val) else val for val in row)
+                        for row in all_data
+                    ]
+                
+                # 优化的批量插入 - 减少提交频率
+                processed_batches = 0
+                for i in range(0, len(filtered_data), batch_size):
+                    batch = filtered_data[i:i+batch_size]
+                    cursor.executemany(insert_sql, batch)
+                    total_rows += len(batch)
+                    processed_batches += 1
                     
-                    # 分批执行插入
-                    for i in range(0, len(filtered_data), batch_size):
-                        batch = filtered_data[i:i+batch_size]
-                        cursor.executemany(insert_sql, batch)
-                        total_rows += len(batch)
+                    # 每10个批次或最后一批才提交，减少I/O
+                    if processed_batches % 10 == 0 or i + batch_size >= len(filtered_data):
+                        conn.commit()
                         
-                        # 每批次提交一次，减轻数据库压力
-                        self.conn.commit()
+                self.logger.info(f"优化的批处理：处理{len(all_data)}行，{processed_batches}个批次")
             
             self.logger.info(f"成功插入 {total_rows} 行数据到MySQL表 '{table_name}'")
             return total_rows
         except Exception as e:
             self.logger.error(f"写入MySQL出错: {str(e)}")
-            self.conn.rollback()
+            # 安全的回滚操作，确保连接存在
+            try:
+                if hasattr(self, 'conn') and self.conn:
+                    self.conn.rollback()
+            except Exception as rollback_error:
+                self.logger.warning(f"回滚操作失败: {rollback_error}")
             raise
     
     def create_indices(self, table_name, headers, max_indices=3):
@@ -1219,8 +1716,12 @@ class MySQLDatabase(Database):
                     result = cursor.fetchone()
                     
                     if result['count'] == 0:
-                        cursor.execute(f"CREATE INDEX `{idx_name}` ON `{table_name}` (`{col}`)")
-                        self.logger.info(f"创建MySQL索引: {idx_name} 在列 '{col}'")
+                        # 使用安全的表名和列名防止SQL注入
+                        safe_table_name = sanitize_table_name(table_name)
+                        safe_col = sanitize_column_name(col)
+                        safe_idx_name = f"idx_{safe_table_name}_{idx}"
+                        cursor.execute(f"CREATE INDEX `{safe_idx_name}` ON `{safe_table_name}` (`{safe_col}`)")
+                        self.logger.info(f"创建MySQL索引: {safe_idx_name} 在列 '{safe_col}'")
             
             self.conn.commit()
             self.logger.info(f"为MySQL表 '{table_name}' 创建了 {len(index_candidates)} 个索引")
@@ -1249,8 +1750,10 @@ class MySQLDatabase(Database):
                 
                 for table in tables:
                     table_name = table['table_name']
-                    self.logger.info(f"优化表: {table_name}")
-                    cursor.execute(f"OPTIMIZE TABLE `{table_name}`")
+                    # 使用安全的表名防止SQL注入
+                    safe_table_name = sanitize_table_name(table_name)
+                    self.logger.info(f"优化表: {safe_table_name}")
+                    cursor.execute(f"OPTIMIZE TABLE `{safe_table_name}`")
             
             self.conn.commit()
             self.logger.info("MySQL数据库表优化完成")
@@ -1283,8 +1786,9 @@ class MySQLDatabase(Database):
                 table_name = table['table_name']
                 
                 with self.conn.cursor() as cursor:
-                    # 获取行数
-                    cursor.execute(f"SELECT COUNT(*) as count FROM `{table_name}`")
+                    # 获取行数，使用安全的表名防止SQL注入
+                    safe_table_name = sanitize_table_name(table_name)
+                    cursor.execute(f"SELECT COUNT(*) as count FROM `{safe_table_name}`")
                     row_count = cursor.fetchone()['count']
                     
                     # 获取列信息
@@ -1470,10 +1974,8 @@ def file_to_database(
                 table_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in table_name)
                 logger.info(f"使用规范化的工作表名 '{table_name}' 作为目标表名")
 
-            # 确保表名合法性
-            table_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in table_name)
-            if not table_name or not table_name[0].isalpha():
-                table_name = 'T_' + table_name
+            # 确保表名合法性（SQL安全版）
+            table_name = sanitize_table_name(table_name)
             
             logger.info(f"工作表 '{current_sheet}' 信息: {len(headers)} 列, 约 {estimated_rows} 行")
             
@@ -1600,7 +2102,14 @@ def file_to_database(
             total_chunks = (estimated_rows + chunk_size - 1) // chunk_size
             logger.info(f"将分成 {total_chunks} 个数据块并行处理")
             
-            pbar = tqdm(total=estimated_rows, desc=f"处理 {current_sheet}")
+            pbar = tqdm(
+                total=estimated_rows, 
+                desc=f"处理 {current_sheet}",
+                unit="行",
+                unit_scale=True,
+                ncols=100,
+                bar_format='{l_bar}{bar:30}{r_bar}{bar:-30b}'
+            )
             
             # 在file_to_database函数中的"准备并行任务"部分
             # 准备并行任务
@@ -1620,30 +2129,28 @@ def file_to_database(
                     executor.submit(process_chunk, t): t[0]
                     for t in tasks
                 }
-                data_chunks = []
+                # 使用字典存储数据块，避免O(n²)排序算法
+                data_chunks_dict = {}
+                completed_chunks = 0
+                
                 for future in concurrent.futures.as_completed(futures):
                     chunk_id, chunk_data = future.result()
                     if chunk_data:
-                        # 按块ID有序插入
-                        insert_pos = 0
-                        for i, (existing_id, _) in enumerate(data_chunks):
-                            if chunk_id < existing_id:
-                                insert_pos = i
-                                break
-                            else:
-                                insert_pos = i + 1
-                        data_chunks.insert(insert_pos, (chunk_id, chunk_data))
-                        
+                        # 直接存储到字典中，保持O(1)复杂度
+                        data_chunks_dict[chunk_id] = chunk_data
                         processed_rows += len(chunk_data)
                         pbar.update(len(chunk_data))
                     
-                    if len(data_chunks) % 5 == 0:
+                    completed_chunks += 1
+                    # 每处理5个块进行一次内存清理
+                    if completed_chunks % 5 == 0:
                         gc.collect()
             
             pbar.close()
             
-            # 整理后写入数据库
-            chunk_data_only = [chunk for _, chunk in data_chunks]
+            # 整理后写入数据库 - 按chunk_id排序确保数据顺序正确
+            sorted_chunks = sorted(data_chunks_dict.items())
+            chunk_data_only = [chunk_data for _, chunk_data in sorted_chunks]
             logger.info("将处理好的数据写入数据库...")
             total_inserted = db.write_data(table_name, headers, chunk_data_only, excel_to_db_mapping)
             logger.info(f"成功插入 {total_inserted} 行数据到表 '{table_name}'")
@@ -1664,7 +2171,9 @@ def file_to_database(
             
             logger.info(f"工作表 '{current_sheet}' 处理完成! 耗时: {sheet_time:.2f} 秒")
             
-            data_chunks = None
+            # 清理内存
+            data_chunks_dict = None
+            sorted_chunks = None
             chunk_data_only = None
             gc.collect()
         
@@ -1746,7 +2255,7 @@ def load_field_mapping(mapping_file):
             with open(mapping_file, 'r', encoding='utf-8') as f:
                 import csv
                 reader = csv.reader(f)
-                header = next(reader)  # 跳过表头
+                next(reader)  # 跳过表头行
                 
                 for row in reader:
                     if len(row) < 3:
@@ -1840,10 +2349,17 @@ def apply_column_transformation(excel_value, transform_rule):
         old, new = rule_parts[1].split(',', 1)
         return str(excel_value).replace(old, new)
     elif rule_name == 'date_format' and len(rule_parts) > 1:
-        from datetime import datetime
         try:
-            # 假设excel_value是日期对象
-            return excel_value.strftime(rule_parts[1])
+            # 改进的日期格式处理，支持多种日期类型
+            from datetime import datetime
+            if isinstance(excel_value, datetime):
+                return excel_value.strftime(rule_parts[1])
+            elif hasattr(excel_value, 'strftime'):  # pandas Timestamp等
+                return excel_value.strftime(rule_parts[1])
+            else:
+                # 尝试解析字符串日期
+                parsed_date = datetime.strptime(str(excel_value), '%Y-%m-%d')
+                return parsed_date.strftime(rule_parts[1])
         except:
             return excel_value
     else:
@@ -2061,7 +2577,11 @@ def main():
                 with open(args.file_path, 'rb') as f:
                     sample = f.read(4096)
                 result = chardet.detect(sample)
-                csv_params['encoding'] = result['encoding'] if result['confidence'] > 0.7 else 'utf-8'
+                # 防御性处理
+                if result and result.get('confidence', 0) > 0.7 and result.get('encoding'):
+                    csv_params['encoding'] = result['encoding']
+                else:
+                    csv_params['encoding'] = 'utf-8'
             
             # 如果指定了分隔符，使用指定的；否则自动检测
             if args.csv_separator:
