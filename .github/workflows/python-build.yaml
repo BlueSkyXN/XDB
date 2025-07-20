@@ -32,7 +32,7 @@ jobs:
             platform: windows-x64
             setup_python_arch: x64
           # macOS builds
-          - os: macos-14
+          - os: macos-15
             arch: arm64
             platform: macos-arm64
             setup_python_arch: arm64
@@ -72,31 +72,24 @@ jobs:
         run: |
           pyinstaller --onefile --hidden-import=sys,os,openpyxl --strip scripts/XLSX-SheetMerger.py --distpath dist/${{ matrix.platform }}
 
-      # 单独上传每个XLSX工具
+      # 单独上传每个XLSX工具 (文件名_py-架构-版本号)
       - name: Upload XLSX-split
         uses: actions/upload-artifact@v4
         with:
-          name: xlsx-split-${{ matrix.platform }}-${{ steps.version.outputs.version }}
+          name: XLSX-split_py-${{ matrix.platform }}-${{ steps.version.outputs.version }}
           path: dist/${{ matrix.platform }}/XLSX-split*
 
       - name: Upload XLSX-SheetCutter
         uses: actions/upload-artifact@v4
         with:
-          name: xlsx-sheetcutter-${{ matrix.platform }}-${{ steps.version.outputs.version }}
+          name: XLSX-SheetCutter_py-${{ matrix.platform }}-${{ steps.version.outputs.version }}
           path: dist/${{ matrix.platform }}/XLSX-SheetCutter*
 
       - name: Upload XLSX-SheetMerger
         uses: actions/upload-artifact@v4
         with:
-          name: xlsx-sheetmerger-${{ matrix.platform }}-${{ steps.version.outputs.version }}
+          name: XLSX-SheetMerger_py-${{ matrix.platform }}-${{ steps.version.outputs.version }}
           path: dist/${{ matrix.platform }}/XLSX-SheetMerger*
-
-      # XLSX工具合集上传
-      - name: Upload XLSX Tools Bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: xlsx-tools-bundle-${{ matrix.platform }}-${{ steps.version.outputs.version }}
-          path: dist/${{ matrix.platform }}/*
 
   # XDB主程序构建 (重型依赖)
   build-xdb:
@@ -121,7 +114,7 @@ jobs:
             platform: windows-x64
             setup_python_arch: x64
           # macOS builds
-          - os: macos-14
+          - os: macos-15
             arch: arm64
             platform: macos-arm64
             setup_python_arch: arm64
@@ -156,12 +149,52 @@ jobs:
       - name: Upload XDB
         uses: actions/upload-artifact@v4
         with:
-          name: xdb-${{ matrix.platform }}-${{ steps.version.outputs.version }}
+          name: XDB_py-${{ matrix.platform }}-${{ steps.version.outputs.version }}
           path: dist/${{ matrix.platform }}/*
+
+  # 同平台全套工具打包 (XDB-all)
+  create-platform-bundles:
+    needs: [build-xlsx-tools, build-xdb]
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        platform: [linux-x64, linux-arm64, windows-x64, macos-arm64]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set commit version
+        id: version
+        run: |
+          VERSION=$(git log --format=%B -1 | head -1)
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+        shell: bash
+
+      # 下载该平台的所有工具
+      - name: Download XLSX tools for platform
+        uses: actions/download-artifact@v4
+        with:
+          pattern: XLSX-*_py-${{ matrix.platform }}-*
+          path: platform-bundle/
+          merge-multiple: true
+
+      - name: Download XDB for platform
+        uses: actions/download-artifact@v4
+        with:
+          name: XDB_py-${{ matrix.platform }}-${{ steps.version.outputs.version }}
+          path: platform-bundle/
+
+      # 上传平台全套包 (ALL-仓库名字-架构-版本号)
+      - name: Upload XDB Platform Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ALL-XDB-${{ matrix.platform }}-${{ steps.version.outputs.version }}
+          path: platform-bundle/*
 
   # 全平台合集打包
   create-release-bundle:
-    needs: [build-xlsx-tools, build-xdb]
+    needs: [create-platform-bundles]
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout code
@@ -175,19 +208,12 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
         shell: bash
 
-      # 下载所有artifacts
-      - name: Download all XLSX tools
+      # 下载所有ALL-XDB平台包
+      - name: Download all ALL-XDB platform bundles
         uses: actions/download-artifact@v4
         with:
-          pattern: xlsx-tools-bundle-*
-          path: release-bundle/xlsx-tools/
-          merge-multiple: false
-
-      - name: Download all XDB builds
-        uses: actions/download-artifact@v4
-        with:
-          pattern: xdb-*
-          path: release-bundle/xdb/
+          pattern: ALL-XDB-*
+          path: release-bundle/
           merge-multiple: false
 
       # 创建完整发布包
@@ -198,27 +224,22 @@ jobs:
           for platform in linux-x64 linux-arm64 windows-x64 macos-arm64; do
             mkdir -p "complete-release/$platform"
             
-            # 复制XLSX工具
-            if [ -d "release-bundle/xlsx-tools/xlsx-tools-bundle-$platform-${{ steps.version.outputs.version }}" ]; then
-              cp -r "release-bundle/xlsx-tools/xlsx-tools-bundle-$platform-${{ steps.version.outputs.version }}/"* "complete-release/$platform/"
-            fi
-            
-            # 复制XDB
-            if [ -d "release-bundle/xdb/xdb-$platform-${{ steps.version.outputs.version }}" ]; then
-              cp -r "release-bundle/xdb/xdb-$platform-${{ steps.version.outputs.version }}/"* "complete-release/$platform/"
+            # 复制ALL-XDB平台包 (包含所有4个工具)
+            if [ -d "release-bundle/ALL-XDB-$platform-${{ steps.version.outputs.version }}" ]; then
+              cp -r "release-bundle/ALL-XDB-$platform-${{ steps.version.outputs.version }}/"* "complete-release/$platform/"
             fi
           done
 
       - name: Upload Complete Release Bundle
         uses: actions/upload-artifact@v4
         with:
-          name: xdb-complete-release-${{ steps.version.outputs.version }}
+          name: FULL-XDB-${{ steps.version.outputs.version }}
           path: complete-release/*
 
   # Release发布 (仅在release触发时执行)
   publish-release:
     if: github.event_name == 'release'
-    needs: [build-xlsx-tools, build-xdb, create-release-bundle]
+    needs: [create-release-bundle]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -238,14 +259,14 @@ jobs:
       - name: Download all single program artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: xlsx-*
+          pattern: XLSX-*_py-*
           path: release-assets/single/
           merge-multiple: false
 
-      - name: Download XDB artifacts
+      - name: Download XDB single program artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: xdb-*
+          pattern: XDB_py-*
           path: release-assets/single/
           merge-multiple: false
 
@@ -253,7 +274,7 @@ jobs:
       - name: Download complete release bundle
         uses: actions/download-artifact@v4
         with:
-          name: xdb-complete-release-${{ steps.version.outputs.version }}
+          name: FULL-XDB-${{ steps.version.outputs.version }}
           path: release-assets/complete/
 
       # 压缩各平台文件
