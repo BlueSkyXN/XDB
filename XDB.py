@@ -951,6 +951,13 @@ def process_chunk(args):
             # 处理NaN值 - 使用pandas的优化方法
             df_chunk = df_chunk.where(pd.notnull(df_chunk), None)
             
+            # 处理pandas Timestamp类型转换为字符串
+            for col in df_chunk.columns:
+                if df_chunk[col].dtype.name.startswith('datetime'):
+                    df_chunk[col] = df_chunk[col].dt.strftime('%Y-%m-%d %H:%M:%S')
+                elif any(isinstance(val, pd.Timestamp) for val in df_chunk[col].dropna().iloc[:5] if val is not None):
+                    df_chunk[col] = df_chunk[col].apply(lambda x: x.strftime('%Y-%m-%d %H:%M:%S') if isinstance(x, pd.Timestamp) else x)
+            
             # 转换为元组列表（最后一步才转换以减少内存使用）
             processed_data = [tuple(row) for row in df_chunk.values]
             
@@ -971,6 +978,8 @@ def process_chunk(args):
                         cell_value = apply_column_transformation(cell_value, transform_rules[headers[i]])
                     if is_nan_or_empty(cell_value):
                         processed_row.append(None)
+                    elif isinstance(cell_value, pd.Timestamp):
+                        processed_row.append(cell_value.strftime('%Y-%m-%d %H:%M:%S'))
                     else:
                         if isinstance(cell_value, str):
                             import unicodedata
@@ -1112,12 +1121,12 @@ class SQLiteDatabase(Database):
                     max_safe_mmap = min(int(available_memory * 0.1), 268435456)  # 256MB
                     mmap_size = max(max_safe_mmap, 67108864)  # 最小64MB
                 
-                # 使用参数化查询防止SQL注入
-                self.conn.execute('PRAGMA mmap_size = ?', (mmap_size,))
+                # 设置内存映射大小
+                self.conn.execute(f'PRAGMA mmap_size = {mmap_size}')
             except Exception as e:
                 self.logger.warning(f"设置内存映射大小失败: {e}，使用默认设置")
                 mmap_size = 268435456  # 256MB 默认值
-                self.conn.execute('PRAGMA mmap_size = ?', (mmap_size,))
+                self.conn.execute(f'PRAGMA mmap_size = {mmap_size}')
             
             self.logger.info(f"已连接到SQLite数据库: {self.db_path}")
             self.logger.info(f"已设置内存映射大小: {mmap_size / (1024**3):.1f} GB (可用内存: {available_memory / (1024**3):.1f} GB)")
