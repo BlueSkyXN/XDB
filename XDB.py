@@ -51,6 +51,10 @@ import unicodedata
 import threading
 import json
 
+# 常量定义
+DEFAULT_MMAP_SIZE = 256 * 1024 * 1024   # 256MB 默认内存映射大小
+MIN_MMAP_SIZE = 64 * 1024 * 1024        # 64MB 最小内存映射大小
+
 # SQL安全工具函数
 def validate_sql_identifier(name):
     """验证SQL标识符安全性（表名、列名等）"""
@@ -1108,21 +1112,21 @@ class SQLiteDatabase(Database):
             
             # 动态设置内存映射大小（更安全的限制）
             available_memory = None
-            mmap_size = 268435456  # 256MB 默认值
+            mmap_size = DEFAULT_MMAP_SIZE
             try:
                 available_memory = psutil.virtual_memory().available
                 if available_memory is None or available_memory <= 0:
                     self.logger.warning("无法获取可用内存信息，使用默认内存映射大小")
                 else:
                     # 限制内存映射为可用内存的10%，最大256MB（更保守）
-                    max_safe_mmap = min(int(available_memory * 0.1), 268435456)  # 256MB
-                    mmap_size = max(max_safe_mmap, 67108864)  # 最小64MB
+                    max_safe_mmap = min(int(available_memory * 0.1), DEFAULT_MMAP_SIZE)
+                    mmap_size = max(max_safe_mmap, MIN_MMAP_SIZE)
                 
                 # 设置内存映射大小
                 self.conn.execute(f'PRAGMA mmap_size = {mmap_size}')
             except Exception as e:
                 self.logger.warning(f"设置内存映射大小失败: {e}，使用默认设置")
-                mmap_size = 268435456  # 256MB 默认值
+                mmap_size = DEFAULT_MMAP_SIZE
                 self.conn.execute(f'PRAGMA mmap_size = {mmap_size}')
             
             self.logger.info(f"已连接到SQLite数据库: {self.db_path}")
