@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from openpyxl import Workbook
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 XDB_SCRIPT = REPO_ROOT / "XDB.py"
 
@@ -102,6 +104,41 @@ class XDBRegressionTests(unittest.TestCase):
         self.assertEqual(XDB.sanitize_column_name("updated_at"), "updated_at")
         self.assertEqual(XDB.sanitize_column_name("delete_flag"), "delete_flag")
         self.assertEqual(XDB.sanitize_column_name("select_code"), "select_code")
+
+    def test_generated_pk_avoids_case_insensitive_id_collision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            xlsx_path = tmp_path / "sample.xlsx"
+            db_path = tmp_path / "sample.db"
+
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Data"
+            ws.append(["ID", "Name"])
+            ws.append([1, "Alice"])
+            wb.save(xlsx_path)
+            wb.close()
+
+            run_xdb(
+                str(xlsx_path),
+                "--db-type",
+                "sqlite",
+                "--sqlite-path",
+                str(db_path),
+                "--target-table",
+                "sample",
+                "--mode",
+                "overwrite",
+                "--quiet",
+            )
+
+            with sqlite3.connect(db_path) as conn:
+                table_info = conn.execute("PRAGMA table_info(sample)").fetchall()
+                rows = conn.execute("SELECT xdb_id, ID, Name FROM sample").fetchall()
+
+            columns = [row[1] for row in table_info]
+            self.assertEqual(columns[:3], ["xdb_id", "ID", "Name"])
+            self.assertEqual(rows, [(1, 1, "Alice")])
 
     def test_mysql_mapping_write_uses_source_column_order(self):
         XDB = import_xdb()

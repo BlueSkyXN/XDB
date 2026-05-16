@@ -198,13 +198,13 @@ def normalize_transform_rules(sheet_rules, raw_headers, headers):
 
 def generated_pk_name(headers):
     """选择不会和源字段冲突的自动主键列名"""
-    existing = set(headers or [])
+    existing = {str(header).casefold() for header in (headers or [])}
     for candidate in ('id', 'xdb_id', '_xdb_id'):
-        if candidate not in existing:
+        if candidate.casefold() not in existing:
             return candidate
 
     counter = 1
-    while f'_xdb_id_{counter}' in existing:
+    while f'_xdb_id_{counter}'.casefold() in existing:
         counter += 1
     return f'_xdb_id_{counter}'
 
