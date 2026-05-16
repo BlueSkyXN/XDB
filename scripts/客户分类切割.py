@@ -29,6 +29,10 @@ print(f"输出目录: {output_dir}")
 df = pd.read_excel(input_file)
 print(f"总共读取到 {len(df)} 行数据")
 
+if 'Name' not in df.columns:
+    print("错误: 输入文件缺少必需列 Name")
+    sys.exit(1)
+
 # 定义规则
 rules = {
     "教育类客户": {
@@ -98,19 +102,21 @@ if save_in_one_file:
 
 # 创建子表
 for category, rule in rules.items():
+    source_df = unmatched
     # 初始化筛选条件
-    condition = pd.Series(False, index=df.index)
+    condition = pd.Series(False, index=source_df.index)
     
     # 处理关键词匹配
     if "keywords" in rule:
-        condition |= df['Name'].str.contains('|'.join(rule['keywords']), case=False, na=False)
+        keyword_pattern = '|'.join(re.escape(keyword) for keyword in rule['keywords'])
+        condition |= source_df['Name'].str.contains(keyword_pattern, case=False, na=False, regex=True)
     
     # 处理正则表达式匹配
     if "regex" in rule:
-        condition |= df['Name'].str.match(rule['regex'])
+        condition |= source_df['Name'].str.match(rule['regex'], na=False)
     
     # 根据条件提取数据
-    matched = df[condition]
+    matched = source_df[condition]
     
     # 将匹配到的从未匹配中删除
     unmatched = unmatched.loc[~condition]

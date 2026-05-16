@@ -22,13 +22,14 @@ raw_sheet_name = config.get('General', 'raw_sheet_name')
 csv_encoding = config.get('General', 'csv_encoding', fallback='utf-8')
 department_column_name = config.get('General', 'KEY', fallback='二级部门名称')
 del_key = config.get('General', 'DELKEY', fallback='姓名')  # 读取DELKEY
+os.makedirs(output_directory, exist_ok=True)
 
 tag_departments = {}
 for tag, departments in config.items('TagDepartments'):
     tag_departments[tag] = [dep.strip() for dep in departments.split(',')]
 
 # 读取DELLIST的内容
-name_list = config.get('DELLIST', del_key, fallback="").split(", ")
+name_list = [name.strip() for name in config.get('DELLIST', del_key, fallback="").split(",") if name.strip()]
 
 # 读取XLSX文件
 workbook = load_workbook(xlsx_file)
@@ -39,7 +40,11 @@ if raw_sheet_name in workbook.sheetnames:
 
     # 读取表格数据
     data = []
-    columns_to_process = config.get('ColumnMappings', raw_sheet_name, fallback="姓名, 邮箱前缀, 一级部门名称, 二级部门名称").split(",")
+    columns_to_process = [
+        column.strip()
+        for column in config.get('ColumnMappings', raw_sheet_name, fallback="姓名, 邮箱前缀, 一级部门名称, 二级部门名称").split(",")
+        if column.strip()
+    ]
     print("列名称:", columns_to_process)
 
     for row in sheet.iter_rows(min_row=2, values_only=True):
@@ -77,3 +82,5 @@ if raw_sheet_name in workbook.sheetnames:
         print(f"已生成CSV文件: {filepath}")
 else:
     print(f"名为 '{raw_sheet_name}' 的子表不存在。")
+
+workbook.close()

@@ -45,7 +45,7 @@ XDB采用模块化设计，主要包含以下核心组件：
 4. **类型检测与映射**：
    - 基于样本数据智能推断类型
    - 针对不同数据库定制类型映射策略
-   - 主键自动检测和优化
+   - 默认创建独立自增主键，避免样本误判导致导入失败
 
 5. **字段映射引擎**：
    - 多种映射配置方式（文件、内联）
@@ -258,9 +258,13 @@ flowchart LR
 pandas>=1.0.0
 openpyxl>=3.0.0
 tqdm>=4.45.0
-pymysql>=1.0.0 (MySQL支持)
+pymysql>=1.0.0
 psutil>=5.7.0
+chardet>=5.0.0
+xlsxwriter>=3.0.0
 ```
+
+其中 `pymysql` 用于 MySQL 导入，`xlsxwriter` 用于 `scripts/客户分类切割.py` 辅助脚本。
 
 ### 安装方法
 
@@ -425,6 +429,8 @@ python XDB.py large_file.xlsx --db-type sqlite --sqlite-path output.db \
 ```
 "工作表1:Excel列1=数据库列1,Excel列2=数据库列2;工作表2:Excel列3=数据库列3"
 ```
+
+源字段可以使用 Excel/CSV 中看到的原始表头，也可以使用程序清理后的安全列名；目标字段会被清理成安全数据库列名。
 
 例如：
 ```
