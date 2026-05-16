@@ -46,6 +46,14 @@ from abc import ABC, abstractmethod
 import csv
 import chardet
 import math
+import hashlib
+import unicodedata
+import threading
+import json
+
+# 常量定义
+DEFAULT_MMAP_SIZE = 256 * 1024 * 1024   # 256MB 默认内存映射大小
+MIN_MMAP_SIZE = 64 * 1024 * 1024        # 64MB 最小内存映射大小
 
 # SQL安全工具函数
 def validate_sql_identifier(name):
@@ -61,7 +69,6 @@ def validate_sql_identifier(name):
         raise ValueError(f"SQL标识符过长（最大64字符）: {name}")
     
     # 只允许字母、数字、下划线、中文
-    import re
     if not re.match(r'^[a-zA-Z_\u4e00-\u9fff][a-zA-Z0-9_\u4e00-\u9fff]*$', name):
         raise ValueError(f"SQL标识符包含非法字符: {name}")
     
@@ -101,7 +108,6 @@ def sanitize_table_name(raw_name):
         return safe_sql_identifier(cleaned)
     except ValueError as e:
         # 如果验证失败，生成安全的替代名
-        import hashlib
         safe_hash = hashlib.md5(str(raw_name).encode()).hexdigest()[:8]
         return f"table_{safe_hash}"
 
@@ -125,7 +131,6 @@ def sanitize_column_name(raw_name):
         return safe_sql_identifier(cleaned[:64])
     except ValueError as e:
         # 如果验证失败，生成安全的替代名
-        import hashlib
         safe_hash = hashlib.md5(str(raw_name).encode()).hexdigest()[:8]
         return f"col_{safe_hash}"
 
@@ -367,10 +372,10 @@ def is_integer_value(value):
         return False
 
 def is_float_value(value):
-    """检测值是否为浮点数（包括科学计数法），排除整数"""
+    """检测值是否为浮点数（包括科学计数法），排除整数、NaN和Inf"""
     try:
         if isinstance(value, float):
-            return True
+            return not (math.isnan(value) or math.isinf(value))
         if isinstance(value, int):
             return False  # 整数不是浮点数
         if isinstance(value, str):
@@ -783,7 +788,6 @@ def get_sample_data(file_path, sheet_name=None, sample_size=100, file_type=None,
         finally:
             # 显式清理DataFrame内存
             del df_sample
-            import gc
             gc.collect()
     except Exception as e:
         logger.error(f"获取样本数据失败: {str(e)}")
@@ -837,7 +841,6 @@ def process_chunk(args):
     # 注意:这里增加了transform_rules参数!
     
     # 每个进程使用独立的日志记录器（并发安全增强版）
-    import threading
     worker_id = f"worker_{os.getpid()}_{threading.get_ident()}"
     worker_logger = logging.getLogger(worker_id)
     
@@ -930,7 +933,6 @@ def process_chunk(args):
                         )
             
             # 向量化字符串清理（仅对字符串列）
-            import unicodedata
             def clean_string_vectorized(x):
                 if pd.isna(x) or not isinstance(x, str):
                     return x
@@ -944,7 +946,7 @@ def process_chunk(args):
                              or char in ' \t')
             
             # 对所有字符串列应用清理
-            string_cols = df_chunk.select_dtypes(include=['object']).columns
+            string_cols = df_chunk.select_dtypes(include=['object', 'string']).columns
             for col in string_cols:
                 df_chunk[col] = df_chunk[col].apply(clean_string_vectorized)
             
@@ -963,7 +965,6 @@ def process_chunk(args):
             
             # 显式清理DataFrame内存
             del df_chunk
-            import gc
             gc.collect()
             
         except Exception as e:
@@ -982,7 +983,6 @@ def process_chunk(args):
                         processed_row.append(cell_value.strftime('%Y-%m-%d %H:%M:%S'))
                     else:
                         if isinstance(cell_value, str):
-                            import unicodedata
                             cell_value = cell_value.replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
                             cell_value = cell_value.replace('\t', ' ').replace('\f', ' ').replace('\v', ' ')
                             cell_value = cell_value.replace('\b', '').replace('\a', '')
@@ -1111,25 +1111,29 @@ class SQLiteDatabase(Database):
             self.conn.execute('PRAGMA temp_store = MEMORY')
             
             # 动态设置内存映射大小（更安全的限制）
+            available_memory = None
+            mmap_size = DEFAULT_MMAP_SIZE
             try:
                 available_memory = psutil.virtual_memory().available
                 if available_memory is None or available_memory <= 0:
                     self.logger.warning("无法获取可用内存信息，使用默认内存映射大小")
-                    mmap_size = 268435456  # 256MB 默认值
                 else:
                     # 限制内存映射为可用内存的10%，最大256MB（更保守）
-                    max_safe_mmap = min(int(available_memory * 0.1), 268435456)  # 256MB
-                    mmap_size = max(max_safe_mmap, 67108864)  # 最小64MB
+                    max_safe_mmap = min(int(available_memory * 0.1), DEFAULT_MMAP_SIZE)
+                    mmap_size = max(max_safe_mmap, MIN_MMAP_SIZE)
                 
                 # 设置内存映射大小
                 self.conn.execute(f'PRAGMA mmap_size = {mmap_size}')
             except Exception as e:
                 self.logger.warning(f"设置内存映射大小失败: {e}，使用默认设置")
-                mmap_size = 268435456  # 256MB 默认值
+                mmap_size = DEFAULT_MMAP_SIZE
                 self.conn.execute(f'PRAGMA mmap_size = {mmap_size}')
             
             self.logger.info(f"已连接到SQLite数据库: {self.db_path}")
-            self.logger.info(f"已设置内存映射大小: {mmap_size / (1024**3):.1f} GB (可用内存: {available_memory / (1024**3):.1f} GB)")
+            if available_memory is not None:
+                self.logger.info(f"已设置内存映射大小: {mmap_size / (1024**2):.1f} MB (可用内存: {available_memory / (1024**2):.1f} MB)")
+            else:
+                self.logger.info(f"已设置内存映射大小: {mmap_size / (1024**2):.1f} MB")
             
             return self.conn
         except Exception as e:
@@ -1305,7 +1309,7 @@ class SQLiteDatabase(Database):
                 # 发生错误时回滚事务
                 try:
                     cursor.execute("ROLLBACK")
-                except:
+                except Exception:
                     pass  # 回滚失败也不要抛出异常
                 raise e
             finally:
@@ -1475,10 +1479,10 @@ class MySQLDatabase(Database):
                 with self.conn.cursor() as cursor:
                     cursor.execute("SET autocommit = 1")
                     # 恢复保存的原始安全设置
-                    unique_check_val = getattr(self, '_original_unique_checks', 1)
-                    foreign_key_val = getattr(self, '_original_foreign_key_checks', 1)
-                    cursor.execute(f"SET unique_checks = {unique_check_val}")
-                    cursor.execute(f"SET foreign_key_checks = {foreign_key_val}")
+                    unique_check_val = int(getattr(self, '_original_unique_checks', 1))
+                    foreign_key_val = int(getattr(self, '_original_foreign_key_checks', 1))
+                    cursor.execute("SET unique_checks = %s", (unique_check_val,))
+                    cursor.execute("SET foreign_key_checks = %s", (foreign_key_val,))
                     self.logger.info("MySQL安全检查已恢复到原始设置")
                 self.conn.commit()
             except Exception as e:
@@ -2245,7 +2249,6 @@ def load_field_mapping(mapping_file):
         
         if file_ext == '.json':
             # JSON格式: {sheet_name: {excel_column: db_column, ...}, ...}
-            import json
             with open(mapping_file, 'r', encoding='utf-8') as f:
                 mapping = json.load(f)
                 
@@ -2262,7 +2265,6 @@ def load_field_mapping(mapping_file):
             mapping = {}
             
             with open(mapping_file, 'r', encoding='utf-8') as f:
-                import csv
                 reader = csv.reader(f)
                 next(reader)  # 跳过表头行
                 
@@ -2360,7 +2362,6 @@ def apply_column_transformation(excel_value, transform_rule):
     elif rule_name == 'date_format' and len(rule_parts) > 1:
         try:
             # 改进的日期格式处理，支持多种日期类型
-            from datetime import datetime
             if isinstance(excel_value, datetime):
                 return excel_value.strftime(rule_parts[1])
             elif hasattr(excel_value, 'strftime'):  # pandas Timestamp等
@@ -2369,7 +2370,7 @@ def apply_column_transformation(excel_value, transform_rule):
                 # 尝试解析字符串日期
                 parsed_date = datetime.strptime(str(excel_value), '%Y-%m-%d')
                 return parsed_date.strftime(rule_parts[1])
-        except:
+        except (ValueError, TypeError, AttributeError):
             return excel_value
     else:
         return excel_value
