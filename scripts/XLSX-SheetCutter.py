@@ -11,6 +11,19 @@ def sanitize_filename(filename):
     filename = filename.strip()
     return filename
 
+def unique_output_file(directory, base_name, sheet_name, used_paths):
+    sanitized_sheet_name = sanitize_filename(sheet_name) or "Sheet"
+    base_path = os.path.join(directory, f"{base_name}_{sanitized_sheet_name}.xlsx")
+    output_path = base_path
+    counter = 1
+
+    while output_path in used_paths:
+        output_path = os.path.join(directory, f"{base_name}_{sanitized_sheet_name}_{counter}.xlsx")
+        counter += 1
+
+    used_paths.add(output_path)
+    return output_path
+
 def main():
     # 检查是否提供了输入文件路径
     if len(sys.argv) < 2:
@@ -36,6 +49,7 @@ def main():
         sys.exit(1)
 
     # 遍历所有子表
+    used_output_paths = set()
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
 
@@ -50,10 +64,7 @@ def main():
             new_ws.append(new_row)
 
         # 生成输出文件名，注意处理非法字符
-        sanitized_sheet_name = sanitize_filename(sheet_name)
-        if not sanitized_sheet_name:
-            sanitized_sheet_name = "Sheet"
-        output_file = os.path.join(input_dir, f"{input_name}_{sanitized_sheet_name}.xlsx")
+        output_file = unique_output_file(input_dir, input_name, sheet_name, used_output_paths)
 
         # 保存新的工作簿
         try:
@@ -61,6 +72,10 @@ def main():
             print(f"已保存 {output_file}")
         except Exception as e:
             print(f"保存工作簿时出错 {output_file}: {e}")
+        finally:
+            new_wb.close()
+
+    wb.close()
 
 if __name__ == "__main__":
     main()

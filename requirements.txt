@@ -1,0 +1,7 @@
+pandas>=1.0.0
+openpyxl>=3.0.0
+tqdm>=4.45.0
+psutil>=5.7.0
+chardet>=5.0.0
+pymysql>=1.0.0
+xlsxwriter>=3.0.0

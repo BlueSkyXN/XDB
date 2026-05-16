@@ -1,43 +1,34 @@
-# scripts agent instructions
+# scripts navigation card
 
-## Purpose
+`scripts/` 保存独立 Excel 辅助工具，不属于 `XDB.py` 核心导入路径。
+修改脚本 CLI、`config_template.ini` 或脚本文档前先读本卡片。
+关键文件：`XLSX-split.py`、`XLSX-SheetCutter.py`、`XLSX-SheetMerger.py`、`客户分类切割.py`、`README_XLSX-split.md`。
 
-`scripts/` 保存独立的 Excel 辅助工具：拆分 CSV、按 sheet 切割、合并 sheet，以及客户名称分类。它们服务于数据整理，不是 `XDB.py` 的核心导入路径。
+## Local invariants
 
-## Scope
-
-适用于 `scripts/` 下的 Python 脚本、`config_template.ini` 和脚本文档。
-
-## Read first
-
-- `scripts/README_XLSX-split.md`
-- `scripts/config_template.ini`
-- 修改目标脚本本身的 CLI 参数、输入列和输出文件逻辑。
-- `.github/workflows/multi-platform-build.yaml` 中对应 PyInstaller 构建命令。
+- 保持脚本可从仓库根目录用 `python scripts/<name>.py ...` 运行。
+- `XLSX-split.py` 依赖 `General`、`TagDepartments`、`ColumnMappings`，并读取可选 `DELLIST`；改配置解析时保持 key 兼容。
+- `XLSX-SheetCutter.py`、`XLSX-SheetMerger.py` 当前只复制单元格值，不复制样式；语义变化要同步用法说明。
+- `客户分类切割.py` 要求输入有 `Name` 列；分类关键词/regex 顺序会影响结果。
+- 脚本输出是用户数据产物；smoke 必须写到临时目录。
 
 ## Local rules
 
-- 保持脚本可从仓库根目录直接运行；修改参数时同步脚本文档或用法提示。
-- `XLSX-split.py` 依赖 INI 的 `General`、`TagDepartments`、`ColumnMappings`，可选 `DELLIST`；不要破坏这些 key 名称的兼容性。
-- `XLSX-SheetCutter.py` 和 `XLSX-SheetMerger.py` 当前只复制单元格值，不复制样式；如果改变语义，要在用法说明中写清楚。
-- `客户分类切割.py` 依赖输入表的 `Name` 列，分类规则顺序会影响结果；修改关键词或顺序时用样例数据验证。
-- 输出的 CSV/XLSX 是用户数据产物；测试时写入临时目录。
+- 修改 flag、位置参数、config key、输出文件名或必需输入列时，同步 README/help/config template。
+- 不让辅助脚本依赖 `XDB.py` 私有实现，除非同时说明并验证这个耦合。
+- CI 会打包 `XLSX-split.py`、`XLSX-SheetCutter.py`、`XLSX-SheetMerger.py`；重命名入口必须改 workflow。
 
 ## Do not
 
-- 不把本机真实绝对路径写进脚本默认值；示例路径只放在模板或文档中。
-- 不手动提交脚本生成的 CSV/XLSX 输出文件。
-- 不让辅助脚本反向依赖 `XDB.py` 的内部实现，除非同时补测试说明和打包验证。
+- 不新增本机绝对路径作为默认值；示例路径只放模板或文档。
+- 不提交本地运行生成的 CSV/XLSX。
+- 不静默改变 CSV 输出编码；保持配置驱动。
 
 ## Validation
 
-无法从仓库中确认专用自动测试命令，优先运行根目录通用验证命令。按改动脚本补最小 smoke：
+使用根验证，并按改动脚本补 smoke：
 
 - `python scripts/XLSX-split.py -c <config.ini>`
 - `python scripts/XLSX-SheetCutter.py <input.xlsx>`
 - `python scripts/XLSX-SheetMerger.py <input1.xlsx> <input2.xlsx>`
 - `python scripts/客户分类切割.py <input.xlsx> <output_dir>`
-
-## Notes for future agents
-
-CI 会用 PyInstaller 分别打包 `XLSX-split.py`、`XLSX-SheetCutter.py`、`XLSX-SheetMerger.py`；重命名文件或入口会影响 release 资产。

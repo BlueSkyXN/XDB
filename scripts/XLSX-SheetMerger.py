@@ -22,7 +22,19 @@ def sanitize_sheet_name(name):
     invalid_chars = '[]:*?/\\'
     for char in invalid_chars:
         name = name.replace(char, '')
-    return name
+    return name.strip() or 'Sheet'
+
+def unique_sheet_name(workbook, base_name):
+    base_name = sanitize_sheet_name(base_name)[:31] or 'Sheet'
+    sheet_name = base_name
+    counter = 1
+
+    while sheet_name in workbook.sheetnames:
+        suffix = f"_{counter}"
+        sheet_name = f"{base_name[:31-len(suffix)]}{suffix}"
+        counter += 1
+
+    return sheet_name
 
 def main():
     # 获取输入文件列表
@@ -83,14 +95,8 @@ def main():
             else:
                 new_sheet_name = f"{file_basename}_{sheet_name}"
 
-            new_sheet_name = sanitize_sheet_name(new_sheet_name)
-
-            # 如果工作表名已存在，添加数字后缀
-            original_sheet_name = new_sheet_name
-            counter = 1
-            while new_sheet_name in output_wb.sheetnames:
-                new_sheet_name = f"{original_sheet_name}_{counter}"
-                counter += 1
+            # 清理、截断并确保工作表名唯一
+            new_sheet_name = unique_sheet_name(output_wb, new_sheet_name)
 
             # 创建新的工作表
             new_ws = output_wb.create_sheet(title=new_sheet_name)
@@ -101,6 +107,8 @@ def main():
                 for cell in row:
                     new_row.append(cell.value)
                 new_ws.append(new_row)
+
+        wb.close()
 
     # 保存合并后的工作簿
     try:

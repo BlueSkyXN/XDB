@@ -37,6 +37,9 @@ jobs:
     - name: 安装依赖
       run: pip install pandas openpyxl pymysql tqdm psutil chardet cryptography
 
+    - name: 运行回归测试
+      run: python -m unittest discover -s tests -p 'test_*.py'
+
     - name: 创建测试数据
       run: |
         # 创建CSV测试文件
